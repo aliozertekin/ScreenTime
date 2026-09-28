@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screentime"
+version = "1.0.0"
+description = "A native, fully local application usage tracker for Arch Linux"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "psutil>=5.9",
+    "PyGObject>=3.46",
+    "pycairo>=1.25",
+]
+
+[project.optional-dependencies]
+x11 = ["python-xlib>=0.33"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+screentime-daemon = "screentime.daemon:main"
+screentime-gui = "screentime.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["screentime*"]
+
+[tool.setuptools.package-data]
+screentime = ["migrations/*.sql", "resources/**/*"]

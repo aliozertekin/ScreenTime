@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ScreenTime Tracking Daemon
+Comment=Background usage tracker (starts silently, no window)
+Exec=screentime-daemon
+Icon=screentime
+NoDisplay=true
+Terminal=false
+X-GNOME-Autostart-enabled=false

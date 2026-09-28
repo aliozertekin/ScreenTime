@@ -1,0 +1,14 @@
+{
+    "KPlugin": {
+        "Id": "screentime-focus",
+        "Name": "ScreenTime Focus Bridge",
+        "Description": "Pushes the currently activated window's app id, pid, and title to the local ScreenTime tracker over D-Bus, so active usage time can be measured on Plasma/Wayland. No network access; nothing is stored by this script.",
+        "Version": "1.0",
+        "License": "MIT",
+        "ServiceTypes": [
+            "KWin/Script"
+        ]
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ScreenTime
+GenericName=Application Usage Tracker
+Comment=See how you spend time on your computer, entirely offline
+Exec=screentime-gui
+Icon=screentime
+Terminal=false
+Categories=Utility;System;Monitor;
+StartupWMClass=org.screentime.App
+Keywords=screen;time;usage;tracker;productivity;

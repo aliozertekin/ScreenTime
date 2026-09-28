@@ -1,0 +1,7 @@
+{
+  "uuid": "screentime-focus@screentime.local",
+  "name": "ScreenTime Focus Bridge",
+  "description": "Exposes the currently focused window over D-Bus so the ScreenTime tracker can measure active usage time on GNOME/Wayland, where no client-facing API for this exists by design. Does nothing else: no network access, no data collection beyond relaying the focused window's app id/pid/title over the session bus for local D-Bus callers.",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/screentime/screentime"
+}
