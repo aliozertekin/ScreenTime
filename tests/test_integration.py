@@ -165,7 +165,11 @@ def test_app_detail_stats(tmp_path):
     # app_detail()'s "today" figures are anchored to the real wall-clock date
     # (datetime.date.today()), so this test must use "now" rather than a
     # fixed historical date to exercise that path meaningfully.
-    t0 = time.time() - 4000  # a bit earlier today, comfortably clear of midnight
+    # Anchored to today's local midnight + 1h (all sessions end by 02:30 the same
+    # day) rather than `now - 4000s`, which fell on *yesterday* whenever the
+    # suite ran in the first hour after midnight.
+    from screentime.db import day_start_epoch, local_day
+    t0 = day_start_epoch(local_day(time.time())) + 3600
     clock = FakeClock(t0)
     sm = SessionManager(db, wall_clock=clock.now_wall, mono_clock=clock.now_mono)
 

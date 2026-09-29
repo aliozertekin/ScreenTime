@@ -63,8 +63,13 @@ class App:
 
 
 class Database:
-    def __init__(self, path: Optional[Path] = None):
+    def __init__(self, path: Optional[Path] = None, recover_orphans: bool = True):
+        """recover_orphans: close sessions left open by a crashed daemon.
+        Only the daemon (which holds the single-instance lock) may do this --
+        a GUI connection must pass False, or merely opening the window would
+        close the *live* daemon's open session."""
         self.path = path or default_db_path()
+        self._recover_orphans = recover_orphans
         self._conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
@@ -82,7 +87,8 @@ class Database:
             self._conn.executescript(sql)
         # Recover any session left open by a previous crash (no GUI/daemon
         # ever left it open on purpose past process exit).
-        self._recover_orphaned_sessions()
+        if self._recover_orphans:
+            self._recover_orphaned_sessions()
 
     def _recover_orphaned_sessions(self):
         """If the daemon died without closing its open session, close it now
@@ -119,6 +125,16 @@ class Database:
             )
             row = self._conn.execute("SELECT * FROM apps WHERE key = ?", (key,)).fetchone()
         return self._row_to_app(row)
+
+    def get_app_by_key(self, key: str) -> Optional[App]:
+        row = self._conn.execute("SELECT * FROM apps WHERE key = ?", (key,)).fetchone()
+        return self._row_to_app(row) if row else None
+
+    def rename_app(self, app_id: int, display_name: str, icon_name: Optional[str] = None):
+        self._conn.execute(
+            "UPDATE apps SET display_name = ?, icon_name = COALESCE(?, icon_name) WHERE id = ?",
+            (display_name, icon_name, app_id),
+        )
 
     def set_excluded(self, app_id: int, excluded: bool):
         self._conn.execute("UPDATE apps SET excluded = ? WHERE id = ?", (1 if excluded else 0, app_id))

@@ -4,25 +4,25 @@ Documentation=https://github.com/screentime/screentime
 # Only makes sense once there's a graphical session to read window focus from.
 After=graphical-session.target
 PartOf=graphical-session.target
+# Never give up restarting: a start-rate limit would otherwise leave tracking
+# permanently off after a few early-boot failures.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/screentime-daemon
+# Restart after a crash. A clean exit (SIGTERM at logout, or "another daemon
+# already holds the lock") is deliberately not restarted.
 Restart=on-failure
 RestartSec=3
-# The daemon reads a lot of small env vars (WAYLAND_DISPLAY, DISPLAY,
-# XDG_SESSION_TYPE, XDG_CURRENT_DESKTOP, SWAYSOCK, HYPRLAND_INSTANCE_SIGNATURE,
-# XDG_SESSION_ID) from the user's graphical session environment. On most
-# modern setups systemd --user already imports these via
-# `systemctl --user import-environment` in the session startup, or the
-# service inherits them from being started as part of graphical-session.target.
-# If autodetection reports "unsupported"/"disabled" in Settings, see the
-# README section "Environment variables not reaching the systemd service".
-
-# Keep resource usage negligible: this competes with nothing, but limits
-# guard against any unexpected runaway behavior.
+TimeoutStopSec=10
+# Keep resource usage negligible.
 MemoryHigh=64M
 CPUWeight=10
+# Session environment (WAYLAND_DISPLAY, DISPLAY, XDG_CURRENT_DESKTOP, ...) is
+# inherited from the user manager. If it isn't ready yet at start, the daemon
+# re-runs backend detection until one is available (see daemon.py), so no
+# ordering hacks are needed here.
 
 [Install]
 WantedBy=graphical-session.target

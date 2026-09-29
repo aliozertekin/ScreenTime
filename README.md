@@ -52,7 +52,10 @@ that go through the same `Database` class. This means:
 | Persistence | `screentime/db.py` | SQLite schema, crash-safe writes, crash recovery |
 | Statistics/query layer | `screentime/stats.py` | Read-only aggregation for the GUI (today/week/month/all-time, per-app detail) |
 | Configuration | `screentime/config.py` | Typed accessors over the `settings` table |
-| Autostart | `screentime/autostart.py` | Enables/disables the systemd service or XDG autostart entry |
+| Autostart | `screentime/autostart.py` | Picks and configures the start-at-login mechanism (systemd user unit or XDG autostart entry), self-heals it, reports startup status |
+| Steam names | `screentime/steam_library.py` | Offline Steam AppID -> game-name resolution from Steam's local manifests (`steam_app_<id>` windows); cached, invalidated when Steam's files change |
+| Packaging hook | `screentime.install` | pacman post-upgrade: restarts running per-user daemons |
+| Single-instance guard | `screentime/instance_lock.py` | `flock`-based lock so only one daemon ever tracks, however it was launched |
 | Wayland companion installer | `screentime/wayland_setup.py` | Auto-installs/enables the GNOME extension or KWin script on first run |
 | GUI | `screentime/gui/` | GTK4 + Libadwaita: sidebar nav, Dashboard/Applications/History/Statistics/Settings |
 
@@ -248,9 +251,11 @@ pip install pytest --break-system-packages   # or: pacman -S python-pytest
 pytest tests/ -v
 ```
 
-91 unit + integration tests cover the session/timing engine, the DB layer,
+263 unit + integration tests cover the session/timing engine, the DB layer,
 window/idle detector parsing against realistic canned compositor output,
-the Wayland companion installer, and full app-switching / restart / crash /
+the Wayland companion installer, start-at-login logic (against a fake
+`systemctl`), real-process daemon lifecycle (second instance, SIGTERM,
+SIGKILL-then-restart), and full app-switching / restart / crash /
 midnight scenarios end-to-end. A handful that build real GTK widgets need a
 display and skip cleanly without one (GTK can segfault rather than raise a
 clean exception if built with zero display connection at all) — on a
@@ -261,17 +266,25 @@ instead to actually exercise them.
 
 ## Running it
 
+The recommended way is to toggle **Settings → "Start tracking automatically
+at login"** in the app. It chooses the right mechanism for your session (see
+"How start-at-login works" below), starts the daemon immediately, and is safe
+to toggle repeatedly.
+
 ```sh
-systemctl --user daemon-reload
-systemctl --user start screentime-daemon      # start tracking now
-systemctl --user enable screentime-daemon     # and automatically at every login
 screentime-gui                                 # open the dashboard
 ```
 
-Or toggle **Settings → "Start tracking automatically at login"** in the
-app itself — it does the same `systemctl --user enable --now` under the
-hood (falling back to an XDG autostart `.desktop` entry on non-systemd
-setups).
+Manual equivalent on a session that reaches `graphical-session.target`
+(GNOME, Plasma with systemd startup, uwsm, ...):
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now screentime-daemon
+```
+
+Do not run `systemctl --user enable` on a session that doesn't reach that
+target — it succeeds but never starts anything (see below).
 
 The daemon runs independently of the GUI: you can close the ScreenTime
 window (or never open it) and tracking continues in the background. A tray
@@ -280,7 +293,143 @@ without hunting through your launcher.
 
 ---
 
+### Steam game names
+
+Proton/Wine games show up as a window class `steam_app_<AppID>` with no
+`.desktop` file, which used to display as "Steam App 2620". Names are now
+resolved **entirely offline** from Steam's own files (no Steam Web API, no
+network; `tests/test_steam_library.py` fails if any network module is ever
+imported):
+
+1. A `.desktop` entry (e.g. a Steam shortcut with `steam://rungameid/<id>`)
+   still wins if one exists.
+2. Otherwise `<library>/steamapps/appmanifest_<AppID>.acf` (`name`, falling
+   back to `installdir`). Libraries come from every Steam root
+   (`~/.local/share/Steam`, `~/.steam/steam|root`, Flatpak
+   `~/.var/app/com.valvesoftware.Steam/...`, Snap; symlinked duplicates
+   collapsed) plus each path in `libraryfolders.vdf` (current and legacy
+   formats). Libraries on unmounted drives are skipped.
+3. Native Linux Steam games (whose window class doesn't say "steam") are named
+   via the `SteamGameId`/`SteamAppId` environment Steam sets on the game's
+   process; their app key is unchanged.
+
+The app *key* never changes, so existing history keeps grouping under the same
+app. If nothing is found (uninstalled game, unknown AppID, no Steam) it falls
+back to "Steam App <id>" and tracking is unaffected; a good name already stored
+is never overwritten by that fallback. On daemon start, rows still holding the
+old "Steam App <id>" name are renamed if the game is now resolvable.
+
+Performance: results, including "unknown", are cached; the daemon's per-poll
+lookups do no disk I/O. The cache is dropped when `libraryfolders.vdf` or a
+library's `steamapps` directory changes (checked at most every 30 s), so newly
+installed games appear without a restart.
+
+Diagnosing a name that still shows as "Steam App <id>": run
+`python -m screentime.steam_library` (lists the Steam locations searched and
+every game found; pass AppIDs to test specific ones). The daemon also logs once
+per unresolved AppID which locations it searched (`journalctl --user -u
+screentime-daemon`), and `scripts/diagnose.sh` includes both. If the name is
+still old right after an upgrade, the running daemon is probably pre-upgrade;
+see "Upgrades".
+
+Limitations: only *installed* games can be named (uninstalled games have no
+manifest; Steam's binary `appinfo.vdf` is not parsed). Names come from the
+manifest, so they are in the game's default language.
+
+### Sleep and resume
+
+Time while the machine is suspended is never counted, and tracking restarts
+by itself on wake:
+
+* The daemon subscribes to logind's `PrepareForSleep` and holds a logind
+  **delay inhibitor** (`Inhibit("sleep", ..., "delay")`), so the open session is
+  closed *before* the system sleeps rather than racing the freeze. The inhibitor
+  is released right after the session is closed and re-taken on wake. If logind
+  refuses it, tracking still works (see the next point).
+* Durations use the monotonic clock, which does not advance during suspend, so
+  even if the daemon is frozen before it can handle the signal, both signals
+  are delivered on wake and the sleep is still excluded.
+* Between "going to sleep" and the resume signal no new session may open (a poll
+  tick in that window would otherwise create one that spans the sleep).
+* Fail-safes so tracking can never stay paused: if the wall clock has run
+  ahead of the monotonic clock (the machine really slept and the wake signal was
+  missed), or 30 s pass with no resume (a cancelled suspend), tracking resumes.
+* On wake it starts a session for whichever window is focused at that moment.
+
+Settings -> Diagnostics shows the last sleep and wake times the daemon saw
+(`last_suspend`/`last_resume` settings), so you can confirm it after sleeping.
+This covers *suspend*. A locked screen or a display that merely turns off is not
+treated as sleep; those are covered by idle detection only.
+
+### Upgrades
+
+A package upgrade replaces the Python files but does not restart a running
+`systemd --user` service, so the old daemon kept running the old code until the
+next login (new fixes seemed not to work). Now:
+
+* `screentime.install` (a pacman install script referenced by the PKGBUILD)
+  runs `systemctl --user try-restart screentime-daemon` for every logged-in
+  user after an upgrade. `try-restart` only acts on an already-running service.
+* The daemon records its version in the settings table (`daemon_version`). When
+  the GUI opens it restarts a running daemon that is *older* than the installed
+  app (a daemon that never recorded a version counts as older). It never starts a
+  daemon you stopped, and never restarts a newer one.
+* Settings -> Diagnostics shows the running daemon's version.
+
+### How start-at-login works
+
+`screentime-daemon` (not the GUI) is what starts at login. Closing or never
+opening the window has no effect on tracking.
+
+* **systemd user service** (preferred: restarts the daemon after a crash).
+  The unit is `WantedBy=graphical-session.target`, which only sessions that
+  manage that target through systemd ever reach. Settings therefore checks
+  `graphical-session.target` in the *current* session and only uses the unit
+  if it is active.
+* **XDG autostart entry** (`~/.config/autostart/screentime-daemon.desktop`,
+  absolute `Exec=` path) otherwise — honoured by every mainstream desktop,
+  including sessions that never reach the target (legacy Plasma startup,
+  plain sway/Hyprland).
+* Only one mechanism is left in place at a time.
+* If the package binary `/usr/bin/screentime-daemon` doesn't exist (e.g. a
+  `pip install --user` / `install.sh` install, where the script lives in
+  `~/.local/bin`), a per-user unit with the real absolute `ExecStart` is
+  written to `~/.config/systemd/user/`. (The packaged unit's `/usr/bin` path
+  used to make the service fail at every login on such installs.)
+* The daemon takes a `flock` lock in `$XDG_RUNTIME_DIR`, so launching it
+  twice (unit + autostart entry, the Settings button, a shell) never yields
+  two trackers: the second exits with status 0. The kernel releases the lock
+  if the holder dies, so a crash can't leave a stale lock.
+* The GUI reads/writes the database with orphan-session recovery disabled;
+  only the daemon (lock holder) recovers sessions left open by a crash.
+  Previously, opening the GUI could close the live daemon's open session.
+* If a backend isn't available at daemon start (session environment or
+  compositor helper not ready yet during login), the daemon retries detection
+  every 20 s while on the "unsupported"/"disabled" backend instead of
+  tracking nothing until the next restart. A working detector is never
+  replaced, so the KWin D-Bus ownership rule is unaffected.
+* On GUI start, if the setting is on but the mechanism has gone missing (e.g.
+  a package upgrade replaced the unit), it is re-established and the daemon
+  started if needed. This never disables anything you enabled by hand.
+
+**Settings → Diagnostics** shows: whether the daemon is installed, whether
+start-at-login is enabled (and via which mechanism), whether it is running,
+when it last started, and the detection backends it selected.
+
 ## Troubleshooting
+
+**Tracking doesn't resume after reboot/login?** Check Settings → Diagnostics
+first. Then:
+
+```sh
+systemctl --user status screentime-daemon            # "enabled" but never started?
+systemctl --user is-active graphical-session.target   # "inactive" => use the XDG entry
+journalctl --user -u screentime-daemon -b             # exit 203/EXEC => bad ExecStart path
+ls ~/.config/autostart/screentime-daemon.desktop
+```
+
+Toggling the Settings switch off and on re-picks the mechanism for the
+current session type.
 
 If tracking isn't recording anything, run:
 
@@ -340,7 +489,9 @@ All settings live in the `settings` table and are editable from
 | `idle_timeout_seconds` | `300` (5 min) | Stop counting active time after this long without input |
 | `poll_interval_seconds` | `2` | How often the daemon checks the focused window |
 | `heartbeat_interval_seconds` | `10` | Crash-safety checkpoint granularity |
-| `autostart_enabled` | `false` | Whether the daemon starts with the graphical session |
+| `autostart_enabled` | `false` | The user's start-at-login opt-in (written by the Settings switch; used to self-heal on GUI start) |
+| `daemon_last_start` | — | Written by the daemon at startup (unix time); shown in Diagnostics |
+| `active_window_backend` / `active_idle_backend` | — | Written by the daemon; read-only for the GUI/diagnostics |
 | `minimize_to_tray` | `true` | Closing the window hides it instead of quitting, if a tray icon is available |
 
 App exclusions (Settings → "Excluded applications") are per-app, stored on
@@ -384,16 +535,31 @@ What automatic setup does, and its known caveat on each desktop:
   reload mechanisms: `qdbus .../KWin reconfigure` and, more reliably, the
   explicitly-documented `qdbus .../Scripting.loadScript` call, which loads
   and starts the fresh script content live without needing a restart.
-  Install status is checked directly on disk
-  (`~/.local/share/kwin/scripts/screentime-focus/`) and by comparing its
-  *content* against what's currently bundled (not just whether a file
-  exists there), rather than by parsing `kpackagetool6 --list` output —
-  that command can print `KPackageStructure of KPluginMetaData(...) does
-  not match requested format "KWin/Script"` even for correctly-formatted,
-  definitely-working packages (this affects official KDE-shipped applets
-  and effects too — it's a known, largely cosmetic Plasma 6 log message,
-  not a reliable signal either way, and chasing it wasted real debugging
-  time before this was understood).
+  Install status is checked on disk (`~/.local/share/kwin/scripts/screentime-focus/`):
+  the copy's *content* must match what's currently bundled, **and its
+  `metadata.json` must declare `"KPackageStructure": "KWin/Script"`**.
+  That key is what lets KWin discover a packaged script at session start.
+  Without it the script still installs and even runs when pushed live with
+  `Scripting.loadScript`, so tracking appears to work right after
+  installation, but KWin never loads it at login, so tracking silently stops
+  after every reboot. (v1.0.0-1.0.1 shipped without the key.) If
+  `kpackagetool6 --type KWin/Script --list` prints `KPackageStructure of
+  KPluginMetaData(...screentime-focus...) does not match requested format
+  "KWin/Script"`, **that is this bug, not a cosmetic message**; restarting
+  the daemon (or opening the GUI) reinstalls the corrected script
+  automatically. The bundled key is also checked by the test suite.
+  The persistent script reports every focus change to the daemon, **including
+  "no window focused"** (an empty report). Dropping that event used to leave
+  the daemon attributing time to whichever window it had heard about last.
+  The script only reports *changes* and loads before the daemon exists at
+  login, so about 2 s after the daemon owns its D-Bus name it loads a separate
+  one-shot script (`announce.js`) that reports the already-focused window once
+  and is unloaded again. It never unloads or reloads the persistent script
+  (an earlier version did, and could leave it loaded but not running). Note
+  that `Scripting.loadScript` only registers a script; the installer and the
+  announce step call `Script<id>.run` explicitly. `announce.js` and the
+  persistent script's reporting logic are executed against a mocked KWin API
+  in the test suite (requires `node`; those tests skip without it).
   The KWin script itself prints a line to KWin's own log at every
   meaningful step — load, which activation signal it connected to, each
   window activation, each D-Bus send outcome — specifically because a
@@ -485,7 +651,8 @@ screentime/
 │   ├── window_detector.py        # X11/Wayland active-window strategies
 │   ├── idle_detector.py          # X11/Wayland idle detection
 │   ├── config.py                 # Settings accessor
-│   ├── autostart.py               # systemd/XDG autostart management
+│   ├── autostart.py               # start-at-login mechanism selection, self-heal, status
+│   ├── instance_lock.py           # single-instance daemon lock
 │   ├── stats.py                   # Read-only query layer
 │   ├── daemon.py                  # Tracking daemon entry point
 │   ├── migrations/001_init.sql    # Schema
@@ -495,7 +662,7 @@ screentime/
 │       ├── tray.py                  # Optional tray indicator
 │       ├── views/                    # Dashboard, Applications, History, Statistics, Settings
 │       └── widgets/                   # Shared widgets (usage row, bar chart)
-├── tests/                          # 24 unit + integration tests
+├── tests/                          # unit + integration tests (see "Running tests")
 ├── data/                            # systemd unit, .desktop files, icon, Wayland scripts
 ├── scripts/install.sh                # Manual (non-package) installer
 ├── scripts/uninstall.sh              # Removes the program and (optionally) all data

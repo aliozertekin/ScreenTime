@@ -36,7 +36,12 @@ install -Dm644 "$HERE/data/org.screentime.App.desktop" \
     "$HOME/.local/share/applications/org.screentime.App.desktop"
 install -Dm644 "$HERE/data/icons/screentime.svg" \
     "$HOME/.local/share/icons/hicolor/scalable/apps/screentime.svg"
+# The packaged unit says ExecStart=/usr/bin/screentime-daemon, but pip --user
+# installs the script under $PREFIX/bin. Point the unit at the real path, or it
+# fails (exit 203) at every login.
 install -Dm644 "$HERE/data/screentime-daemon.service" \
+    "$HOME/.config/systemd/user/screentime-daemon.service"
+sed -i "s|^ExecStart=.*|ExecStart=$PREFIX/bin/screentime-daemon|" \
     "$HOME/.config/systemd/user/screentime-daemon.service"
 
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
@@ -51,8 +56,10 @@ Install complete.
 
 Next steps:
   1. Start the tracker now:            systemctl --user start screentime-daemon
-  2. Track automatically at login:     systemctl --user enable screentime-daemon
-     (or toggle "Start at login" in ScreenTime's Settings page, which does the same thing)
+  2. Track automatically at login:     toggle "Start tracking automatically at login" in
+     ScreenTime's Settings page. (Recommended: it also picks the right mechanism for
+     your session type. `systemctl --user enable screentime-daemon` works only on
+     sessions that reach graphical-session.target.)
   3. Open the app:                     screentime-gui   (or find "ScreenTime" in your launcher)
 
 If you're on GNOME or KDE Plasma under Wayland, the small companion

@@ -27,19 +27,12 @@
 
 print("screentime-focus: script loading");
 
-function reportFocus(win) {
-    if (!win) {
-        print("screentime-focus: activation fired with no window (focus cleared)");
-        return;
-    }
-    var resourceClass = win.resourceClass || "";
-    var pid = win.pid || 0;
-    print("screentime-focus: activated resourceClass=" + resourceClass + " pid=" + pid);
+function sendToDaemon(resourceClass, pid, caption) {
     try {
         var payload = JSON.stringify({
             resourceClass: resourceClass,
             pid: pid,
-            caption: win.caption || "",
+            caption: caption,
         });
         callDBus(
             "org.screentime.KWinFocus",
@@ -55,6 +48,22 @@ function reportFocus(win) {
         // place a genuine callDBus/signature problem would ever surface.
         print("screentime-focus: callDBus failed: " + e);
     }
+}
+
+function reportFocus(win) {
+    if (!win) {
+        // Focus moved to "no window" (desktop, lock screen, a transition...).
+        // This MUST still reach the daemon: if it is dropped, the daemon keeps
+        // attributing time to whichever window it heard about last -- e.g. a
+        // browser left open in the background while you use something else.
+        print("screentime-focus: activation fired with no window (focus cleared)");
+        sendToDaemon("", 0, "");
+        return;
+    }
+    var resourceClass = win.resourceClass || "";
+    var pid = win.pid || 0;
+    print("screentime-focus: activated resourceClass=" + resourceClass + " pid=" + pid);
+    sendToDaemon(resourceClass, pid, win.caption || "");
 }
 
 try {

@@ -4,6 +4,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
+import datetime
 
 from ...db import Database
 from ...config import Config
@@ -52,6 +53,7 @@ class SettingsView(Gtk.Box):
         autostart_row.set_subtitle("Runs the background tracker; this window is opened manually")
         autostart_row.set_active(autostart.is_enabled())
         autostart_row.connect("notify::active", self._on_autostart_changed)
+        self._autostart_row = autostart_row
         tracking_group.add(autostart_row)
 
         col.append(tracking_group)
@@ -68,11 +70,25 @@ class SettingsView(Gtk.Box):
         self._daemon_btn.connect("clicked", self._on_toggle_daemon)
         self._daemon_row.add_suffix(self._daemon_btn)
         diag_group.add(self._daemon_row)
+        # Startup diagnostics: lets a failed start-at-login be diagnosed from
+        # here. Reads only systemd/file state and what the daemon recorded in
+        # the settings table -- never instantiates a detector.
+        self._installed_row = Adw.ActionRow(title="Daemon installed")
+        self._enabled_row = Adw.ActionRow(title="Start at login")
+        self._last_start_row = Adw.ActionRow(title="Last daemon start")
+        self._version_row = Adw.ActionRow(title="Daemon version")
+        self._sleep_row = Adw.ActionRow(title="Last sleep / wake seen by daemon")
+        diag_group.add(self._installed_row)
+        diag_group.add(self._enabled_row)
+        diag_group.add(self._last_start_row)
+        diag_group.add(self._version_row)
+        diag_group.add(self._sleep_row)
         self._window_backend_row = Adw.ActionRow(title="Active-window detection")
         self._idle_backend_row = Adw.ActionRow(title="Idle detection")
         diag_group.add(self._window_backend_row)
         diag_group.add(self._idle_backend_row)
         self._refresh_backend_rows()
+        self._refresh_startup_rows()
 
         wayland_status = wayland_setup.status_for_current_desktop()
         if wayland_status is not None:
@@ -144,16 +160,52 @@ class SettingsView(Gtk.Box):
         self.config.set("poll_interval_seconds", int(row.get_value()))
 
     def _on_autostart_changed(self, row, _pspec):
-        if row.get_active():
+        wanted = row.get_active()
+        self.config.set("autostart_enabled", "true" if wanted else "false")
+        if wanted:
             autostart.enable()
         else:
             autostart.disable()
+        self._refresh_startup_rows()
 
     def refresh(self):
         running = autostart.daemon_is_running()
         self._daemon_row.set_subtitle("Running" if running else "Not running")
         self._daemon_btn.set_label("Stop" if running else "Start")
         self._refresh_backend_rows()
+        self._refresh_startup_rows()
+
+    def _refresh_startup_rows(self):
+        st = autostart.get_status(self.db)
+        self._installed_row.set_subtitle("Yes" if st.installed else "No \u2014 screentime-daemon was not found")
+        if st.enabled:
+            how = {"systemd": "systemd user service", "xdg-autostart": "XDG autostart entry"}[st.mechanism]
+            self._enabled_row.set_subtitle(f"Yes ({how})")
+        else:
+            self._enabled_row.set_subtitle("No \u2014 tracking will not resume after you log in again")
+        from ... import __version__
+        recorded = self.db.get_setting("daemon_version")
+        if not recorded:
+            self._version_row.set_subtitle(
+                "Not recorded yet \u2014 the running daemon is older than this app and will be restarted"
+                if st.running else "Not running")
+        elif autostart.daemon_is_outdated(recorded, __version__):
+            self._version_row.set_subtitle(f"{recorded} \u2014 older than this app ({__version__}); it will be restarted")
+        elif recorded != __version__:
+            self._version_row.set_subtitle(f"{recorded} (newer than this window, {__version__}; reopen the app)")
+        else:
+            self._version_row.set_subtitle(recorded)
+        def _fmt(key):
+            raw = self.db.get_setting(key)
+            if raw and raw.isdigit():
+                return datetime.datetime.fromtimestamp(int(raw)).strftime("%Y-%m-%d %H:%M:%S")
+            return "never"
+        self._sleep_row.set_subtitle(f"slept {_fmt('last_suspend')}  \u2022  woke {_fmt('last_resume')}")
+        if st.last_start:
+            when = datetime.datetime.fromtimestamp(st.last_start).strftime("%Y-%m-%d %H:%M:%S")
+            self._last_start_row.set_subtitle(when)
+        else:
+            self._last_start_row.set_subtitle("Never recorded")
 
     def _refresh_backend_rows(self):
         # Deliberately reads what the daemon itself reported (via the

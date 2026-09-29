@@ -42,6 +42,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -96,6 +97,21 @@ def kde_script_is_installed() -> bool:
     return (_kde_script_dest() / "metadata.json").exists()
 
 
+def kde_script_metadata_valid(dest: Optional[Path] = None) -> bool:
+    """A packaged KWin 6 script is only auto-loaded at session start if its
+    metadata.json declares "KPackageStructure": "KWin/Script". Without it the
+    package installs fine and even runs when pushed live via Scripting.loadScript
+    -- but KWin never discovers it at login, so tracking silently dies at every
+    reboot (kpackagetool6 --list shows 'does not match requested format').
+    Being *present on disk* is therefore not proof it will load."""
+    import json
+    try:
+        meta = json.loads(((dest or _kde_script_dest()) / "metadata.json").read_text())
+    except Exception:
+        return False
+    return meta.get("KPackageStructure") == "KWin/Script"
+
+
 def kde_script_is_up_to_date() -> bool:
     """True only if something is installed AND its content matches exactly
     what's currently bundled in this screentime package. False both when
@@ -106,9 +122,69 @@ def kde_script_is_up_to_date() -> bool:
     dest = _kde_script_dest()
     if not (dest / "metadata.json").exists():
         return False
+    if not kde_script_metadata_valid(dest):
+        return False
     try:
         return _hash_resource_dir(dest) == _hash_resource_dir(_kde_script_resource_dir())
     except Exception:
+        return False
+
+
+def _qdbus() -> Optional[str]:
+    return shutil.which("qdbus6") or shutil.which("qdbus")
+
+
+def _kwin_scripting(qdbus: str, member: str, *args: str, path: str = "/Scripting",
+                    iface: str = "org.kde.kwin.Scripting"):
+    return subprocess.run([qdbus, "org.kde.KWin", path, f"{iface}.{member}", *args],
+                          capture_output=True, text=True, timeout=5)
+
+
+def kwin_load_and_run(qdbus: str, script_path: Path, plugin_name: str) -> bool:
+    """Load a script into the running KWin AND start it.
+
+    `Scripting.loadScript` only registers the script and returns its id; it is
+    `Script<id>.run` that executes it (this is how kdotool drives KWin too).
+    Loading without running leaves a script that looks loaded but never fires.
+    `run` on an already-running script is a no-op, so calling it is safe either
+    way. Returns True only if both steps succeeded."""
+    r = _kwin_scripting(qdbus, "loadScript", str(script_path), plugin_name)
+    if r.returncode != 0:
+        return False
+    try:
+        script_id = int(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return False
+    if script_id < 0:                 # KWin already has a script by that name
+        return False
+    ran = _kwin_scripting(qdbus, "run", path=f"/Scripting/Script{script_id}",
+                          iface="org.kde.kwin.Script")
+    return ran.returncode == 0
+
+
+ANNOUNCE_PLUGIN_NAME = "screentime-announce"
+
+
+def announce_focus_once(linger_seconds: float = 1.0) -> bool:
+    """Have KWin report the currently focused window to the daemon, once.
+
+    Runs a tiny separate script (announce.js) and unloads it again. It never
+    touches the persistent `screentime-focus` script, so even if KWin's
+    scripting API behaves unexpectedly this cannot break ongoing tracking (an
+    earlier version unloaded/reloaded the persistent script and could leave it
+    loaded-but-not-running). Local session-bus calls only."""
+    qdbus = _qdbus()
+    announce = _kde_script_dest() / "contents" / "code" / "announce.js"
+    if not qdbus or not announce.exists():
+        return False
+    try:
+        _kwin_scripting(qdbus, "unloadScript", ANNOUNCE_PLUGIN_NAME)   # stale copy from a crash
+        ok = kwin_load_and_run(qdbus, announce, ANNOUNCE_PLUGIN_NAME)
+        time.sleep(linger_seconds)          # let the D-Bus call go out before unloading
+        _kwin_scripting(qdbus, "unloadScript", ANNOUNCE_PLUGIN_NAME)
+        return ok
+    except Exception as e:
+        log.debug("KWin focus announce failed: %s", e)
         return False
 
 
@@ -171,15 +247,13 @@ def install_kde_script() -> tuple[bool, str]:
         main_script = dest / "contents" / "code" / "main.js"
         if main_script.exists():
             try:
-                r = subprocess.run(
-                    [qdbus, "org.kde.KWin", "/Scripting",
-                     "org.kde.kwin.Scripting.loadScript", str(main_script), "screentime-focus"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if r.returncode == 0:
+                # Replace any copy KWin already has with the fresh content,
+                # then load *and run* it (loadScript alone doesn't run it).
+                _kwin_scripting(qdbus, "unloadScript", "screentime-focus")
+                if kwin_load_and_run(qdbus, main_script, "screentime-focus"):
                     reloaded = True
             except Exception as e:
-                log.debug("qdbus loadScript failed: %s", e)
+                log.debug("qdbus loadScript/run failed: %s", e)
 
     if not kde_script_is_installed():
         return False, ("kpackagetool reported success but the script isn't on disk where "

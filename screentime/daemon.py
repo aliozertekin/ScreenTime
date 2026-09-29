@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
+import time
 
 import gi
 gi.require_version("GLib", "2.0")
@@ -32,10 +34,44 @@ from .session_manager import SessionManager, FocusInfo
 from .window_detector import create_window_detector, RawFocus
 from .idle_detector import create_idle_detector
 from . import app_identity
+from . import steam_library
+from . import __version__
 from .process_monitor import resolve_pid_to_app
 from . import wayland_setup
+from .instance_lock import InstanceLock
+
+# While a backend is the honest "nothing available" one, re-run detection this
+# often. At login the session environment / compositor helper may simply not be
+# ready yet when the daemon starts; without a retry the daemon would sit on
+# "unsupported" until the next restart, tracking nothing, while systemd (which
+# only restarts on a *crash*) reports it healthy.
+REDETECT_INTERVAL_SECONDS = 20.0
+# Fail-safes for the suspend guard (see _suspend_guard_expired).
+SUSPEND_GUARD_MAX_SECONDS = 30.0
+SUSPEND_DRIFT_SECONDS = 5.0
+NULL_WINDOW_BACKEND = "unsupported"
+NULL_IDLE_BACKEND = "disabled"
 
 log = logging.getLogger("screentime.daemon")
+
+
+def repair_steam_names(db: Database, resolver=None) -> int:
+    """One-time-per-start fix for names stored *before* Steam resolution existed:
+    rows still showing the "Steam App <id>" fallback are renamed if the game's
+    name can now be found locally. Only touches rows whose name is exactly the
+    fallback, so a name the user or an earlier run already set is never
+    overwritten. Returns how many rows were renamed."""
+    resolver = resolver or steam_library.default_resolver()
+    n = 0
+    for app in db.list_apps():
+        appid = steam_library.appid_from_key(app.key)
+        if appid is None or app.display_name != app_identity.fallback_display_for_key(app.key):
+            continue
+        name = resolver.name_for_appid(appid)
+        if name:
+            db.rename_app(app.id, name, resolver.icon_for_appid(appid) or "steam")
+            n += 1
+    return n
 
 
 class Daemon:
@@ -54,7 +90,25 @@ class Daemon:
         # matters for KWinPushDetector specifically.
         db.set_setting("active_window_backend", self.window_detector.name)
         db.set_setting("active_idle_backend", self.idle_detector.name)
+        db.set_setting("daemon_last_start", str(int(time.time())))
+        # Lets the GUI notice a daemon left running from before an upgrade
+        # (a package upgrade doesn't restart per-user services by itself).
+        db.set_setting("daemon_version", __version__)
+        try:
+            repaired = repair_steam_names(db)
+            if repaired:
+                log.info("Resolved %d stored Steam game name(s)", repaired)
+        except Exception:
+            log.exception("Steam name repair failed (continuing)")
+        self._last_redetect = time.monotonic()
         self._was_idle = False
+        self._steam_unresolved_logged: set = set()
+        self._suspended = False
+        self._suspend_wall = 0.0
+        self._suspend_mono = 0.0
+        self._inhibitor_fd = None
+        self._wall = time.time            # injectable for tests
+        self._mono = time.monotonic
         self._loop = GLib.MainLoop()
         self._sleep_sub_id = None
         self._system_bus = None
@@ -69,14 +123,74 @@ class Daemon:
             if resolved is None:
                 return None
         else:
-            resolved = app_identity.resolve(raw.identifier)
+            resolved = app_identity.resolve(raw.identifier, pid=raw.pid)
+            resolved = self._keep_known_steam_name(resolved)
         return FocusInfo(
             key=resolved.key, display_name=resolved.display_name,
             icon_name=resolved.icon_name, desktop_file=resolved.desktop_file,
         )
 
+    # ------------------------------------------------------ late detection
+    def _maybe_redetect(self):
+        """Retry backend selection while we're on a null backend. Only ever
+        replaces a *null* detector, so a live KWinPushDetector (which owns an
+        exclusive D-Bus name) is never torn down and rebuilt."""
+        window_null = self.window_detector.name == NULL_WINDOW_BACKEND
+        idle_null = self.idle_detector.name == NULL_IDLE_BACKEND
+        if not (window_null or idle_null):
+            return
+        now = time.monotonic()
+        if now - self._last_redetect < REDETECT_INTERVAL_SECONDS:
+            return
+        self._last_redetect = now
+        if window_null:
+            detector = create_window_detector()
+            if detector.name != NULL_WINDOW_BACKEND:
+                log.info("Window backend became available: %s", detector.name)
+                self.window_detector = detector
+                self.db.set_setting("active_window_backend", detector.name)
+        if idle_null:
+            detector = create_idle_detector()
+            if detector.name != NULL_IDLE_BACKEND:
+                log.info("Idle backend became available: %s", detector.name)
+                self.idle_detector = detector
+                self.db.set_setting("active_idle_backend", detector.name)
+
+    def _keep_known_steam_name(self, resolved):
+        """If Steam metadata is unavailable right now (game uninstalled, library
+        drive unmounted) don't overwrite a good name already stored for this
+        app with the "Steam App <id>" fallback."""
+        if steam_library.appid_from_key(resolved.key) is None:
+            return resolved
+        if resolved.display_name != app_identity.fallback_display_for_key(resolved.key):
+            return resolved
+        try:
+            existing = self.db.get_app_by_key(resolved.key)
+        except Exception:
+            return resolved
+        if existing and existing.display_name != resolved.display_name:
+            resolved.display_name = existing.display_name
+            resolved.icon_name = existing.icon_name or resolved.icon_name
+        elif resolved.key not in self._steam_unresolved_logged:
+            # Once per AppID: say where we looked, so "why is it still Steam App
+            # 2620?" can be answered from the journal.
+            self._steam_unresolved_logged.add(resolved.key)
+            log.info("Steam AppID %s has no local manifest; searched %s",
+                     steam_library.appid_from_key(resolved.key),
+                     steam_library.default_resolver().describe())
+        return resolved
+
     # --------------------------------------------------------------- tick
     def _tick(self) -> bool:
+        self._maybe_redetect()
+        if self._suspended:
+            # Between logind's "going to sleep" and the actual freeze (and until
+            # the resume signal) nothing may open a new session: it would then
+            # span the sleep. Fail-safe below prevents ever getting stuck here.
+            if self._suspend_guard_expired():
+                log.warning("Resume signal not seen; resuming tracking on the guard timeout/clock drift")
+                self._resume_tracking()
+            return True
         try:
             idle_seconds = self.idle_detector.get_idle_seconds()
             timeout = self.config.idle_timeout_seconds
@@ -111,13 +225,68 @@ class Daemon:
         except Exception:
             return
         if going_to_sleep:
-            log.info("System suspending: closing open session")
-            self.session_manager.on_suspend()
+            self._suspend_tracking()
         else:
-            log.info("System resumed")
+            self._resume_tracking()
+
+    def _suspend_tracking(self):
+        log.info("System suspending: closing open session")
+        self._suspended = True
+        self._suspend_wall, self._suspend_mono = self._wall(), self._mono()
+        try:
+            self.session_manager.on_suspend()
+            self.db.set_setting("last_suspend", str(int(self._suspend_wall)))
+        except Exception:
+            log.exception("Error closing session for suspend")
+        # Only now let the system proceed: we held a delay inhibitor precisely so
+        # the session is closed *before* the machine sleeps.
+        self._release_sleep_inhibitor()
+
+    def _resume_tracking(self):
+        log.info("System resumed")
+        self._suspended = False
+        self._was_idle = False
+        try:
             raw = self.window_detector.get_focused()
-            focus = self._raw_to_focus(raw)
-            self.session_manager.on_resume(focus)
+            self.session_manager.on_resume(self._raw_to_focus(raw))
+            self.db.set_setting("last_resume", str(int(self._wall())))
+        except Exception:
+            log.exception("Error resuming tracking")
+        self._take_sleep_inhibitor()
+
+    def _suspend_guard_expired(self) -> bool:
+        """True if we've been "suspended" implausibly long without a resume
+        signal. Two independent triggers: the wall clock ran ahead of the
+        monotonic clock (the machine really slept and we missed/lost the
+        signal), or a suspend that never happened (cancelled, inhibited)."""
+        wall_elapsed = self._wall() - self._suspend_wall
+        mono_elapsed = self._mono() - self._suspend_mono
+        return (wall_elapsed - mono_elapsed > SUSPEND_DRIFT_SECONDS
+                or mono_elapsed > SUSPEND_GUARD_MAX_SECONDS)
+
+    # ---- logind delay inhibitor: gives us time to close the session first
+    def _take_sleep_inhibitor(self):
+        if self._inhibitor_fd is not None or self._system_bus is None:
+            return
+        try:
+            result, fd_list = self._system_bus.call_with_unix_fd_list_sync(
+                "org.freedesktop.login1", "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager", "Inhibit",
+                GLib.Variant("(ssss)", ("sleep", "ScreenTime",
+                                        "Closing the current usage session before sleep", "delay")),
+                GLib.VariantType("(h)"), Gio.DBusCallFlags.NONE, 2000, None, None)
+            self._inhibitor_fd = fd_list.get(result.unpack()[0])
+        except Exception as e:
+            # Not fatal: monotonic timing keeps sleep time out of usage anyway.
+            log.debug("Could not take logind sleep delay inhibitor: %s", e)
+
+    def _release_sleep_inhibitor(self):
+        fd, self._inhibitor_fd = self._inhibitor_fd, None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def _setup_sleep_watcher(self):
         try:
@@ -127,6 +296,7 @@ class Daemon:
                 "/org/freedesktop/login1", None, Gio.DBusSignalFlags.NONE,
                 self._on_prepare_for_sleep,
             )
+            self._take_sleep_inhibitor()
             log.info("Subscribed to logind PrepareForSleep for suspend/resume handling")
         except Exception as e:
             log.warning("Could not subscribe to logind sleep signal (%s); suspend/resume will be "
@@ -138,13 +308,27 @@ class Daemon:
         self.session_manager.shutdown(reason)
         self.db.set_setting("active_window_backend", "")
         self.db.set_setting("active_idle_backend", "")
+        self._release_sleep_inhibitor()
         if self._system_bus and self._sleep_sub_id:
             self._system_bus.signal_unsubscribe(self._sleep_sub_id)
         self._loop.quit()
         return False
 
+    def _kick_kwin_script(self) -> bool:
+        """One-shot, off the main thread (it shells out to qdbus)."""
+        import threading
+        def worker():
+            ok = wayland_setup.announce_focus_once()
+            log.info("Asked KWin to re-announce the focused window: %s", "ok" if ok else "not available")
+        threading.Thread(target=worker, daemon=True).start()
+        return False  # GLib one-shot
+
     def run(self):
         self._setup_sleep_watcher()
+        if self.window_detector.name == "kwin-push":
+            # Delay so the detector's D-Bus name is actually acquired (that
+            # happens once the main loop is running) before KWin re-announces.
+            GLib.timeout_add_seconds(2, self._kick_kwin_script)
         interval_ms = max(500, int(self.config.poll_interval_seconds * 1000))
         GLib.timeout_add(interval_ms, self._tick)
 
@@ -164,13 +348,32 @@ def main():
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    db = Database()
-    daemon = Daemon(db)
+    # Idempotent startup: whichever mechanism launched us (systemd unit, XDG
+    # autostart, the Settings button, a shell), only one daemon may track.
+    # Handle SIGTERM/SIGINT from the very start. Startup can take a while
+    # (installing the KWin/GNOME helper, opening the DB); a stop request during
+    # that window must still exit cleanly (status 0, lock released) rather than
+    # killing the process by signal. run() replaces this with its GLib handler.
+    def _early_exit(signum, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, _early_exit)
+    signal.signal(signal.SIGINT, _early_exit)
+
+    lock = InstanceLock()
+    if not lock.acquire():
+        log.info("Another screentime-daemon is already running; exiting (this is not an error)")
+        return 0
     try:
-        daemon.run()
+        db = Database()  # only the lock holder may run crash recovery
+        daemon = Daemon(db)
+        try:
+            daemon.run()
+        finally:
+            db.close()
     finally:
-        db.close()
+        lock.release()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

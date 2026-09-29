@@ -1,11 +1,12 @@
 # Maintainer: You <you@example.com>
 pkgname=screentime
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="A native, fully local application usage tracker (Screen Time for Linux)"
 arch=('any')
 url="https://github.com/screentime/screentime"
 license=('MIT')
+install=screentime.install
 depends=(
     'python'
     'python-psutil'

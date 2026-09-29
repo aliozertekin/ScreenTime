@@ -12,6 +12,8 @@ from ..config import Config
 from .window import MainWindow
 from .tray import try_create_indicator
 from .. import wayland_setup
+from .. import autostart
+from .. import __version__
 
 log = logging.getLogger("screentime.gui")
 
@@ -19,15 +21,35 @@ log = logging.getLogger("screentime.gui")
 class ScreenTimeApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id="org.screentime.App", flags=Gio.ApplicationFlags.FLAGS_NONE)
-        self.db = Database()
+        # recover_orphans=False: only the daemon may close open sessions.
+        self.db = Database(recover_orphans=False)
         self.config = Config(self.db)
         wayland_setup.auto_install_if_needed(self.db)
         self.window: MainWindow | None = None
         self._indicator = None
         self.connect("activate", self._on_activate)
 
+    def _reconcile_autostart(self):
+        """If the user opted in to start-at-login, make sure that's still true
+        and the daemon is running. Idempotent (single-instance lock); runs off
+        the UI thread since it shells out to systemctl."""
+        import threading
+        wanted = self.config.autostart_enabled   # read here: sqlite conn is thread-bound
+        recorded_daemon_version = self.db.get_setting("daemon_version")
+
+        def worker():
+            try:
+                autostart.reconcile(wanted)
+                # A package upgrade leaves the old daemon running old code.
+                if autostart.refresh_if_outdated(recorded_daemon_version, __version__):
+                    log.info("Restarted the tracking daemon to load version %s", __version__)
+            except Exception:
+                log.exception("autostart reconcile failed (continuing)")
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_activate(self, app):
         if self.window is None:
+            self._reconcile_autostart()
             self.window = MainWindow(self, self.db)
             self.window.connect("close-request", self._on_close_request)
             if self.config.minimize_to_tray:

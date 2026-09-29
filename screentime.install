@@ -1,0 +1,19 @@
+# pacman install script for screentime.
+#
+# A package upgrade replaces the Python files on disk but does NOT restart a
+# per-user systemd service that is already running, so after `pacman -U` the
+# daemon kept executing the OLD code until the next login/reboot (new fixes
+# appeared not to work). Restart it for every logged-in user.
+
+post_upgrade() {
+    command -v loginctl >/dev/null 2>&1 || return 0
+    loginctl list-users --no-legend 2>/dev/null | while read -r uid user _rest; do
+        [ -n "$user" ] || continue
+        # try-restart: only acts if the service is currently active, so users
+        # who stopped tracking on purpose are left alone. Never fail the upgrade.
+        timeout 20 systemctl --user --machine="${user}@.host" try-restart screentime-daemon.service \
+            >/dev/null 2>&1 || true
+    done
+    echo ":: screentime: running daemons were restarted to load the new version."
+    return 0
+}

@@ -111,12 +111,35 @@ elif command -v kpackagetool5 >/dev/null 2>&1; then
 fi
 if command -v kreadconfig6 >/dev/null 2>&1; then
     run kreadconfig6 --file kwinrc --group Plugins --key screentime-focusEnabled
+    echo
+    echo "# metadata.json must declare KPackageStructure=KWin/Script or KWin will not load the"
+    echo "# script at login (it may still work until the next reboot if pushed in live):"
+    grep -H KPackageStructure "${XDG_DATA_HOME:-$HOME/.local/share}/kwin/scripts/screentime-focus/metadata.json" \
+        || echo "  MISSING -- this is the 'tracking stops after reboot' bug; restart the daemon to reinstall the script"
+    echo
+    echo "# Does KWin currently hold the script? (true/false)"
+    (command -v qdbus6 >/dev/null && qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.isScriptLoaded screentime-focus) \
+        || (command -v qdbus >/dev/null && qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.isScriptLoaded screentime-focus) \
+        || echo "  (qdbus not available)"
+    echo
+    echo "# Did KWin load the script since this boot? (empty = it did not)"
+    journalctl -b --no-pager SYSLOG_IDENTIFIER=kwin_wayland 2>/dev/null | grep "screentime-focus:" | tail -5
 fi
 if command -v gnome-extensions >/dev/null 2>&1; then
     run gnome-extensions list --enabled
 fi
 
 # ------------------------------------------------------------------- data
+section "Steam game-name resolution (offline, local files only)"
+echo "\$ python3 -m screentime.steam_library"
+python3 -m screentime.steam_library 2>&1 | head -40
+echo
+echo "# Daemon's own note for any Steam AppID it could not name:"
+journalctl --user -u screentime-daemon.service -b --no-pager 2>/dev/null | grep "Steam AppID" | tail -5 || true
+echo "# Which daemon version is running vs installed:"
+python3 -c "import screentime; print('installed:', screentime.__version__)" 2>&1
+echo
+
 section "Database contents"
 echo "\$ python3 - (inspecting the tracking database directly)"
 python3 <<'PYEOF' 2>&1

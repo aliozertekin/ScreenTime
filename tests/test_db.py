@@ -112,3 +112,30 @@ def test_rebuild_daily_totals_matches_sessions(db):
     ).fetchall()[0])
     assert before == after
     assert after["seconds"] == 160
+
+
+def test_gui_connection_does_not_close_live_daemon_session(tmp_path):
+    """Defect: every Database() ran orphan recovery, so merely opening the GUI
+    closed the *running* daemon's open session (recover_orphans=False is what
+    the GUI now passes)."""
+    path = tmp_path / "shared.db"
+    daemon_db = Database(path)
+    app = daemon_db.get_or_create_app("firefox", "Firefox", None, None)
+    sid = daemon_db.open_session(app.id, 1_700_000_000)
+
+    gui_db = Database(path, recover_orphans=False)
+    assert gui_db.get_open_session() is not None
+    assert daemon_db.get_open_session()["id"] == sid
+    gui_db.close()
+    daemon_db.close()
+
+
+def test_daemon_connection_still_recovers_orphans_by_default(tmp_path):
+    path = tmp_path / "crash.db"
+    db1 = Database(path)
+    app = db1.get_or_create_app("firefox", "Firefox", None, None)
+    db1.open_session(app.id, 1_700_000_000)
+    db1.close()
+    db2 = Database(path)   # a restarted daemon
+    assert db2.get_open_session() is None
+    db2.close()

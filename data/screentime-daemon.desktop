@@ -5,5 +5,10 @@ Comment=Background usage tracker (starts silently, no window)
 Exec=screentime-daemon
 Icon=screentime
 NoDisplay=true
+# Hidden=true is the freedesktop-spec way to ship an entry disabled (honoured by
+# KDE, GNOME and systemd's xdg-autostart generator). X-GNOME-Autostart-enabled is
+# GNOME-only, so on Plasma the daemon would have launched regardless of the
+# user's setting. Settings writes a user-level entry (no Hidden) to enable it.
+Hidden=true
 Terminal=false
 X-GNOME-Autostart-enabled=false

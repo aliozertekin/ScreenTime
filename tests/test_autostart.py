@@ -93,6 +93,7 @@ def test_stop_now_uses_systemd_when_available(monkeypatch):
     assert "stop" in run.call_args[0][0]
 
 
+@pytest.mark.real_process_scan
 def test_stop_now_falls_back_to_psutil_terminate(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: None)
     monkeypatch.setattr(Path, "exists", lambda self: False)
