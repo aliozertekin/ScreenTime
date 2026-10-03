@@ -15,6 +15,7 @@ Design goals:
 
 from __future__ import annotations
 
+import functools
 import sqlite3
 import time
 import datetime
@@ -50,6 +51,19 @@ def day_start_epoch(day: str) -> float:
     return d.timestamp()
 
 
+def _writes(fn):
+    """Mark a Database method as a write. With a protected store it runs as one
+    atomic unit of work (cross-process write lock, catch up, record, seal); with
+    a plain SQLite file it is a no-op, exactly as before."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if self._store is None:
+            return fn(self, *args, **kwargs)
+        with self._store.unit():
+            return fn(self, *args, **kwargs)
+    return wrapper
+
+
 @dataclass
 class App:
     id: int
@@ -63,21 +77,57 @@ class App:
 
 
 class Database:
-    def __init__(self, path: Optional[Path] = None, recover_orphans: bool = True):
+    def __init__(self, path: Optional[Path] = None, recover_orphans: bool = True, store=None):
         """recover_orphans: close sessions left open by a crashed daemon.
         Only the daemon (which holds the single-instance lock) may do this --
         a GUI connection must pass False, or merely opening the window would
-        close the *live* daemon's open session."""
-        self.path = path or default_db_path()
+        close the *live* daemon's open session.
+
+        store: a `ProtectedStore` (see protected_store.py). Production code gets
+        one from `storage.open_database()`; the usage data then lives encrypted
+        on disk. Without it this is a plain SQLite file -- used by tests and
+        never by the daemon or GUI."""
+        self._store = store
         self._recover_orphans = recover_orphans
-        self._conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA synchronous = NORMAL")
+        if store is not None:
+            self.path = store.path
+            self._plain = None
+        else:
+            if path is None:
+                # A bare Database() used to open the default plaintext file. That is
+                # now a mistake: it would create an unencrypted usage database next
+                # to the protected one. Production code must use storage.open_database().
+                raise RuntimeError(
+                    "Database() needs an explicit path (tests) or a protected store; "
+                    "use screentime.storage.open_database() to open ScreenTime's real database")
+            self.path = path
+            self._plain = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
+            self._plain.row_factory = sqlite3.Row
+            self._plain.execute("PRAGMA foreign_keys = ON")
+            self._plain.execute("PRAGMA journal_mode = WAL")
+            self._plain.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
 
+    @property
+    def _conn(self):
+        """The connection Database methods use. For a protected store, reading
+        first picks up whatever other processes (the daemon) have written."""
+        if self._store is None:
+            return self._plain
+        self._store.refresh()
+        return self._store.conn
+
+    @property
+    def protected(self) -> bool:
+        return self._store is not None
+
+    def maintenance(self) -> bool:
+        """Fold the encrypted log into a snapshot when it has grown (daemon,
+        periodically). No-op for a plain SQLite file. True if it compacted."""
+        return self._store.compact() if self._store is not None else False
+
     # ------------------------------------------------------------------ setup
+    @_writes
     def _migrate(self):
         cur = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'"
@@ -106,6 +156,7 @@ class Database:
             self._close_session(row["id"], recovered_end, "crash_recovered")
 
     # --------------------------------------------------------------- apps
+    @_writes
     def get_or_create_app(self, key: str, display_name: str, icon_name: Optional[str],
                            desktop_file: Optional[str]) -> App:
         now = int(time.time())
@@ -130,12 +181,14 @@ class Database:
         row = self._conn.execute("SELECT * FROM apps WHERE key = ?", (key,)).fetchone()
         return self._row_to_app(row) if row else None
 
+    @_writes
     def rename_app(self, app_id: int, display_name: str, icon_name: Optional[str] = None):
         self._conn.execute(
             "UPDATE apps SET display_name = ?, icon_name = COALESCE(?, icon_name) WHERE id = ?",
             (display_name, icon_name, app_id),
         )
 
+    @_writes
     def set_excluded(self, app_id: int, excluded: bool):
         self._conn.execute("UPDATE apps SET excluded = ? WHERE id = ?", (1 if excluded else 0, app_id))
 
@@ -159,6 +212,7 @@ class Database:
         )
 
     # ----------------------------------------------------------- sessions
+    @_writes
     def open_session(self, app_id: int, start_time: float) -> int:
         day = local_day(start_time)
         cur = self._conn.execute(
@@ -167,6 +221,7 @@ class Database:
         )
         return cur.lastrowid
 
+    @_writes
     def heartbeat_session(self, session_id: int, new_progress_time: float):
         """Advance the open session's progress checkpoint so a crash loses at
         most one heartbeat interval of data, while `end_time` stays NULL for
@@ -193,6 +248,7 @@ class Database:
             self._conn.execute("ROLLBACK")
             raise
 
+    @_writes
     def _close_session(self, session_id: int, end_time: float, reason: str):
         row = self._conn.execute(
             "SELECT app_id, start_time, last_heartbeat, end_time, day FROM sessions WHERE id = ?", (session_id,)
@@ -217,6 +273,7 @@ class Database:
             self._conn.execute("ROLLBACK")
             raise
 
+    @_writes
     def close_session(self, session_id: int, end_time: float, reason: str):
         self._close_session(session_id, end_time, reason)
         # Count the completed session once it is finalized.
@@ -232,6 +289,7 @@ class Database:
             (app_id, day, seconds_delta, session_delta),
         )
 
+    @_writes
     def split_session_at_midnight(self, session_id: int, close_time: float, open_time: float) -> int:
         """Close the currently open session at the last instant of its local
         day and open a fresh one starting at 00:00:00 the next day for the
@@ -241,6 +299,7 @@ class Database:
         self._close_session(session_id, close_time, "midnight_split")
         return self.open_session(app_id, open_time)
 
+    @_writes
     def rebuild_daily_totals(self):
         """Recompute daily_totals from scratch off the sessions table. Useful
         after manual DB edits or if a bug is ever suspected in the cache."""
@@ -285,6 +344,7 @@ class Database:
         row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
 
+    @_writes
     def set_setting(self, key: str, value: str):
         self._conn.execute(
             "INSERT INTO settings(key, value) VALUES (?, ?) "
@@ -294,8 +354,15 @@ class Database:
 
     # --------------------------------------------------------------- misc
     def close(self):
-        self._conn.close()
+        if self._store is not None:
+            self._store.close()
+        else:
+            self._plain.close()
 
     @property
     def conn(self) -> sqlite3.Connection:
-        return self._conn
+        """Read-side connection for stats queries (always current)."""
+        if self._store is not None:
+            self._store.refresh()
+            return self._store.conn.mem
+        return self._plain

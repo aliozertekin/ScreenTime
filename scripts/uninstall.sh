@@ -134,7 +134,8 @@ elif [ ! -d "$DATA_DIR" ]; then
 else
     DELETE_DATA=$ASSUME_YES
     if ! $ASSUME_YES && ! $DRY_RUN; then
-        echo "Your usage history lives at: $DATA_DIR"
+        echo "Your usage history lives (encrypted) at: $DATA_DIR"
+        echo "Its encryption key is stored separately; without the key the history is unreadable anyway."
         du -sh "$DATA_DIR" 2>/dev/null | sed 's/^/  /'
         read -rp "Delete it permanently? This cannot be undone. [y/N] " ans
         [[ "$ans" == "y" || "$ans" == "Y" ]] && DELETE_DATA=true
@@ -142,6 +143,17 @@ else
     if $DELETE_DATA; then
         say "Deleting $DATA_DIR ..."
         run rm -rf "$DATA_DIR"
+        # The data is encrypted; its key lives elsewhere (key file under the config
+        # dir, or an entry in the system keyring). Delete it too, or an orphaned key
+        # is left behind for data that no longer exists.
+        say "Deleting the database key ..."
+        run rm -rf "$XDG_CONFIG_HOME_/screentime/keys" "$XDG_CONFIG_HOME_/screentime/security.json"
+        rmdir "$XDG_CONFIG_HOME_/screentime" 2>/dev/null || true
+        if command -v secret-tool >/dev/null 2>&1; then
+            run secret-tool clear application screentime purpose database-key || true
+        else
+            say "If you stored the key in your keyring, remove the 'ScreenTime database key' entry there."
+        fi
     else
         say "Keeping your usage data at: $DATA_DIR"
     fi

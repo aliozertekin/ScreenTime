@@ -54,6 +54,9 @@ ExecStart={exec_start}
 # already holds the lock") is deliberately not restarted.
 Restart=on-failure
 RestartSec=3
+# 78 = EX_CONFIG: the protected database can't be opened (lost/mismatched key).
+# Restarting can't fix that, so don't loop; the GUI explains and offers recovery.
+RestartPreventExitStatus=78
 TimeoutStopSec=10
 # Keep resource usage negligible.
 MemoryHigh=64M

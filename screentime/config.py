@@ -4,6 +4,7 @@ on the current value without needing IPC just to read a setting."""
 
 from __future__ import annotations
 
+from . import theme as _theme
 from .db import Database
 
 DEFAULTS = {
@@ -12,6 +13,10 @@ DEFAULTS = {
     "heartbeat_interval_seconds": "10",  # how often to persist progress (crash-safety granularity)
     "autostart_enabled": "false",
     "minimize_to_tray": "true",
+    # Appearance -- three independent settings (see theme.py):
+    "theme": _theme.DEFAULT_THEME_ID,   # a registered theme id
+    "color_scheme": "system",           # system | light | dark (only adaptive themes honour it)
+    "accent_color": "",                 # "" = use the theme's accent, else '#rrggbb'
 }
 
 
@@ -50,3 +55,45 @@ class Config:
     @property
     def minimize_to_tray(self) -> bool:
         return self.get_bool("minimize_to_tray")
+
+    # ---- appearance ------------------------------------------------------
+    # Getters validate: a stale/garbage stored value (a theme that no longer
+    # exists, a hand-edited database) degrades to the default instead of
+    # breaking the UI, and is never written back over the user's data.
+    @property
+    def theme(self) -> str:
+        stored = self.db.get_setting("theme", DEFAULTS["theme"])
+        return stored if _theme.is_known_theme(stored) else _theme.DEFAULT_THEME_ID
+
+    @property
+    def color_scheme(self) -> str:
+        stored = self.db.get_setting("color_scheme", DEFAULTS["color_scheme"])
+        return stored if stored in _theme.COLOR_SCHEMES else "system"
+
+    @property
+    def accent_color(self) -> str:
+        return _theme.normalize_hex(self.db.get_setting("accent_color", "")) or ""
+
+    def set_theme(self, theme_id: str):
+        if not _theme.is_known_theme(theme_id):
+            raise ValueError(f"unknown theme: {theme_id!r}")
+        self.set("theme", theme_id)
+
+    def set_color_scheme(self, scheme: str):
+        if scheme not in _theme.COLOR_SCHEMES:
+            raise ValueError(f"color scheme must be one of {_theme.COLOR_SCHEMES}, got {scheme!r}")
+        self.set("color_scheme", scheme)
+
+    def set_accent_color(self, value):
+        """'#rrggbb' to override the theme's accent; '' / None to clear it."""
+        if not value:
+            self.set("accent_color", "")
+            return
+        norm = _theme.normalize_hex(value)
+        if norm is None:
+            raise ValueError(f"invalid accent color: {value!r}")
+        self.set("accent_color", norm)
+
+    def reset_appearance(self):
+        for key in ("theme", "color_scheme", "accent_color"):
+            self.set(key, DEFAULTS[key])

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "screentime"
-version = "1.1.0"
+version = "1.3.0"
 description = "A native, fully local application usage tracker for Arch Linux"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,6 +13,7 @@ dependencies = [
     "psutil>=5.9",
     "PyGObject>=3.46",
     "pycairo>=1.25",
+    "cryptography>=41",     # AES-256-GCM for the protected database (official Arch package: python-cryptography)
 ]
 
 [project.optional-dependencies]
@@ -22,6 +23,7 @@ dev = ["pytest>=7.0"]
 [project.scripts]
 screentime-daemon = "screentime.daemon:main"
 screentime-gui = "screentime.gui.app:main"
+screentime-security = "screentime.security_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["screentime*"]

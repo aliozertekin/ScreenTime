@@ -85,9 +85,14 @@ echo "# is exactly the bug this script exists to help catch. The daemon records"
 echo "# what it selected in the settings table specifically so nothing else ever"
 echo "# needs to instantiate a live detector just to ask 'what backend is active'."
 python3 <<'PYEOF' 2>&1
-from screentime.db import Database
+from screentime import storage
 from screentime.window_detector import detect_session_type
-db = Database()
+try:
+    # Non-interactive: a diagnostic script must never pop a keyring dialog.
+    db = storage.open_database(recover_orphans=False, interactive=False)
+except Exception as e:
+    print('Could not open the protected database:', storage.explain_open_error(e))
+    raise SystemExit(0)
 print('session type:', detect_session_type())
 print('daemon-reported window backend:', db.get_setting('active_window_backend') or '(not set -- daemon has not started since this was added, or is not running)')
 print('daemon-reported idle backend:', db.get_setting('active_idle_backend') or '(not set)')
@@ -140,12 +145,22 @@ echo "# Which daemon version is running vs installed:"
 python3 -c "import screentime; print('installed:', screentime.__version__)" 2>&1
 echo
 
+section "Security (encrypted storage)"
+run screentime-security status
+echo "# Every stored record is authenticated by 'screentime-security verify' (may prompt for the keyring)."
+echo
+
 section "Database contents"
 echo "\$ python3 - (inspecting the tracking database directly)"
 python3 <<'PYEOF' 2>&1
-from screentime.db import Database
+from screentime import storage
 from screentime import stats
-db = Database()
+try:
+    # Non-interactive: a diagnostic script must never pop a keyring dialog.
+    db = storage.open_database(recover_orphans=False, interactive=False)
+except Exception as e:
+    print('Could not open the protected database:', storage.explain_open_error(e))
+    raise SystemExit(0)
 print('DB path:', db.path)
 apps = db.list_apps()
 print(f'{len(apps)} known app(s):')

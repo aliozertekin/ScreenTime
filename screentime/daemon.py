@@ -29,12 +29,15 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib, Gio
 
 from .db import Database
+from .keystore import KeyStoreError
+from .secure_log import SecureStoreError
 from .config import Config
 from .session_manager import SessionManager, FocusInfo
 from .window_detector import create_window_detector, RawFocus
 from .idle_detector import create_idle_detector
 from . import app_identity
 from . import steam_library
+from . import storage
 from . import __version__
 from .process_monitor import resolve_pid_to_app
 from . import wayland_setup
@@ -45,6 +48,8 @@ from .instance_lock import InstanceLock
 # ready yet when the daemon starts; without a retry the daemon would sit on
 # "unsupported" until the next restart, tracking nothing, while systemd (which
 # only restarts on a *crash*) reports it healthy.
+MAINTENANCE_INTERVAL_SECONDS = 600.0
+EXIT_CONFIG = 78      # EX_CONFIG: a problem a restart cannot fix (see the unit's RestartPreventExitStatus)
 REDETECT_INTERVAL_SECONDS = 20.0
 # Fail-safes for the suspend guard (see _suspend_guard_expired).
 SUSPEND_GUARD_MAX_SECONDS = 30.0
@@ -101,6 +106,7 @@ class Daemon:
         except Exception:
             log.exception("Steam name repair failed (continuing)")
         self._last_redetect = time.monotonic()
+        self._last_maintenance = 0.0
         self._was_idle = False
         self._steam_unresolved_logged: set = set()
         self._suspended = False
@@ -181,8 +187,21 @@ class Daemon:
         return resolved
 
     # --------------------------------------------------------------- tick
+    def _maybe_maintain(self):
+        """Periodically fold the encrypted log into a snapshot. Only the daemon
+        (the long-lived process) does this; GUI readers reload transparently."""
+        now = self._mono()
+        if now - self._last_maintenance < MAINTENANCE_INTERVAL_SECONDS:
+            return
+        self._last_maintenance = now
+        try:
+            self.db.maintenance()
+        except Exception:
+            log.exception("database maintenance failed (continuing)")
+
     def _tick(self) -> bool:
         self._maybe_redetect()
+        self._maybe_maintain()
         if self._suspended:
             # Between logind's "going to sleep" and the actual freeze (and until
             # the resume signal) nothing may open a new session: it would then
@@ -323,7 +342,7 @@ class Daemon:
         threading.Thread(target=worker, daemon=True).start()
         return False  # GLib one-shot
 
-    def run(self):
+    def run(self, should_stop=None):
         self._setup_sleep_watcher()
         if self.window_detector.name == "kwin-push":
             # Delay so the detector's D-Bus name is actually acquired (that
@@ -334,6 +353,9 @@ class Daemon:
 
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: self._shutdown("shutdown"))
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda: self._shutdown("shutdown"))
+        if should_stop is not None and should_stop():
+            # A stop request that arrived before the loop's own handlers existed.
+            GLib.idle_add(lambda: (self._shutdown("shutdown"), False)[1])
 
         log.info("ScreenTime daemon started (window backend=%s, idle backend=%s)",
                   self.window_detector.name, self.idle_detector.name)
@@ -350,24 +372,46 @@ def main():
     )
     # Idempotent startup: whichever mechanism launched us (systemd unit, XDG
     # autostart, the Settings button, a shell), only one daemon may track.
-    # Handle SIGTERM/SIGINT from the very start. Startup can take a while
-    # (installing the KWin/GNOME helper, opening the DB); a stop request during
-    # that window must still exit cleanly (status 0, lock released) rather than
-    # killing the process by signal. run() replaces this with its GLib handler.
-    def _early_exit(signum, _frame):
-        raise SystemExit(0)
-    signal.signal(signal.SIGTERM, _early_exit)
-    signal.signal(signal.SIGINT, _early_exit)
+    #
+    # Handle SIGTERM/SIGINT from the very start: startup can take a while (opening
+    # the protected database, installing the KWin/GNOME helper) and a stop request
+    # in that window must still exit cleanly (status 0, lock released).
+    #
+    # The handler ONLY sets a flag. It must not raise: an exception thrown from a
+    # signal handler lands at an arbitrary point, and when that point is inside
+    # PyGObject's C-backed code (building a GLib.Variant, say) it is either
+    # silently discarded (inside a destructor) or can crash the interpreter.
+    # Startup instead checks the flag at its own safe points -- after each stage
+    # and inside every wait loop -- and run() hands over to GLib's handlers.
+    stop = {"requested": False}
+
+    def _early_stop(signum, _frame):
+        stop["requested"] = True
+    signal.signal(signal.SIGTERM, _early_stop)
+    signal.signal(signal.SIGINT, _early_stop)
+    stopping = lambda: stop["requested"]
 
     lock = InstanceLock()
     if not lock.acquire():
         log.info("Another screentime-daemon is already running; exiting (this is not an error)")
         return 0
     try:
-        db = Database()  # only the lock holder may run crash recovery
-        daemon = Daemon(db)
         try:
-            daemon.run()
+            # Only the lock holder may run crash recovery. wait_for_key: if the
+            # key sits in a keyring that is merely locked/starting, keep
+            # retrying (interruptibly) rather than failing; the daemon never
+            # shows a keyring dialog -- the GUI offers "Unlock".
+            db = storage.open_database(wait_for_key=True, should_stop=stopping)
+        except (storage.StorageError, SecureStoreError, KeyStoreError) as e:
+            log.error("cannot open the protected database: %s", e)
+            return EXIT_CONFIG
+        try:
+            if stopping():
+                return 0
+            daemon = Daemon(db)
+            if stopping():
+                return 0
+            daemon.run(should_stop=stopping)
         finally:
             db.close()
     finally:

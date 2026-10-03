@@ -139,3 +139,13 @@ def test_daemon_connection_still_recovers_orphans_by_default(tmp_path):
     db2 = Database(path)   # a restarted daemon
     assert db2.get_open_session() is None
     db2.close()
+
+
+def test_bare_database_call_is_refused_so_no_plaintext_file_can_be_created_by_accident(tmp_path, monkeypatch):
+    """Database() used to open the default plaintext file. Now it must fail loudly --
+    otherwise any stray caller (a script, a future feature) silently creates an
+    unencrypted usage database next to the protected one."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    with pytest.raises(RuntimeError, match="storage.open_database"):
+        Database()
+    assert not list(tmp_path.rglob("screentime.db*"))

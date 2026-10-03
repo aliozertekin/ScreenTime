@@ -163,3 +163,69 @@ def test_daemon_asks_kwin_to_reannounce_focus_only_for_kwin_push(db, monkeypatch
         if expect:
             assert scheduled[0][0] >= 1          # delayed until the name is acquired
             assert scheduled[0][1].__name__ == "_kick_kwin_script"
+
+
+def test_early_signal_handler_only_sets_a_flag_and_never_raises(tmp_path, monkeypatch):
+    """Regression: the handler used to raise SystemExit. Raised at an arbitrary point
+    inside PyGObject's C-backed code (building a GLib.Variant for the keyring probe)
+    that exception was silently discarded (inside a destructor) or crashed the
+    interpreter outright (exit status -11). The handler must only set a flag."""
+    import signal
+    import screentime.daemon as d
+    from screentime import storage
+    from screentime.db import Database
+
+    monkeypatch.setattr(sys, "argv", ["screentime-daemon"])
+    seen = {}
+
+    def open_and_deliver_sigterm(**kwargs):
+        handler = signal.getsignal(signal.SIGTERM)
+        seen["raised"] = False
+        try:
+            handler(signal.SIGTERM, None)
+        except BaseException:                                # must not happen
+            seen["raised"] = True
+        seen["should_stop"] = kwargs["should_stop"]
+        return Database(tmp_path / "x.db")
+
+    monkeypatch.setattr(storage, "open_database", open_and_deliver_sigterm)
+    monkeypatch.setattr(d, "Daemon", lambda db: pytest.fail("daemon must not start after a stop request"))
+    assert d.main() == 0
+    assert seen["raised"] is False and seen["should_stop"]() is True
+
+
+def test_stop_request_during_daemon_construction_skips_the_loop(tmp_path, monkeypatch):
+    import signal
+    import screentime.daemon as d
+    from screentime.db import Database
+
+    monkeypatch.setattr(sys, "argv", ["screentime-daemon"])
+    monkeypatch.setattr("screentime.storage.open_database", lambda **kw: Database(tmp_path / "y.db"))
+
+    class Constructed:
+        def run(self, should_stop=None):
+            pytest.fail("run() must not be entered after a stop request")
+
+    def construct(db):
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        return Constructed()
+    monkeypatch.setattr(d, "Daemon", construct)
+    assert d.main() == 0
+
+
+def test_run_stops_immediately_if_a_stop_was_requested_before_the_loop_existed(tmp_path, monkeypatch):
+    import screentime.daemon as d
+    from screentime.db import Database
+    db = Database(tmp_path / "z.db")
+    daemon = d.Daemon(db)
+    scheduled = []
+    monkeypatch.setattr(d.GLib, "idle_add", lambda cb: scheduled.append(cb))
+    monkeypatch.setattr(d.GLib, "timeout_add", lambda *a: None)
+    monkeypatch.setattr(d.GLib, "timeout_add_seconds", lambda *a: None)
+    monkeypatch.setattr(d.GLib, "unix_signal_add", lambda *a: None)
+    monkeypatch.setattr(daemon._loop, "run", lambda: None)
+    monkeypatch.setattr(daemon, "_setup_sleep_watcher", lambda: None)
+    shutdowns = []
+    monkeypatch.setattr(daemon, "_shutdown", lambda reason: shutdowns.append(reason))
+    daemon.run(should_stop=lambda: True)
+    assert scheduled and (scheduled[0](), shutdowns == ["shutdown"])[1]

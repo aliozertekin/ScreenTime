@@ -13,6 +13,7 @@ class AppUsageRow(Gtk.Box):
     def __init__(self, display_name: str, icon_name: str | None, seconds: int,
                  max_seconds: int, percent: float, show_percent: bool = True):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.add_css_class("st-app-row")   # row/hover colors come from the theme
         self.set_margin_top(6)
         self.set_margin_bottom(6)
         self.set_margin_start(12)

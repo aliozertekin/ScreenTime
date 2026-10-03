@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Gdk
+from gi.repository import Gtk
+
+from ... import theme as theme_mod
+from ..theme_manager import get_theme_manager
 try:
     # Enables passing a real cairo.Context to Gtk.DrawingArea's draw_func.
     # Ships as part of PyGObject on Arch (paired with the `python-cairo`
@@ -30,7 +33,27 @@ class BarChart(Gtk.DrawingArea):
         self._labels: list[str] = []
         self._values: list[float] = []
         self._value_fmt = str
+        self._theme_handler = None
         self.set_draw_func(self._draw)
+        # Redraw when the theme changes (connected only while on screen, so a
+        # destroyed chart never leaves a callback behind).
+        self.connect("realize", self._on_realize)
+        self.connect("unrealize", self._on_unrealize)
+
+    def _on_realize(self, *_):
+        tm = get_theme_manager()
+        if tm is not None and self._theme_handler is None:
+            self._theme_handler = tm.connect_changed(lambda _palette: self.queue_draw())
+
+    def _on_unrealize(self, *_):
+        tm = get_theme_manager()
+        if tm is not None and self._theme_handler is not None:
+            tm.disconnect_changed(self._theme_handler)
+        self._theme_handler = None
+
+    def _palette(self) -> theme_mod.Palette:
+        tm = get_theme_manager()
+        return tm.palette if tm is not None else theme_mod.fallback_palette()
 
     def set_data(self, labels: list[str], values: list[float], value_fmt=str):
         self._labels = labels
@@ -41,11 +64,9 @@ class BarChart(Gtk.DrawingArea):
     def _draw(self, area, cr, width, height):
         if not _CAIRO_OK:
             return
-        style = self.get_style_context()
-        accent = Gdk.RGBA()
-        accent.parse("#3584e4")
-        fg = Gdk.RGBA()
-        fg.parse("#5e5c64")
+        palette = self._palette()
+        bar_rgb = [c / 255 for c in palette.rgb("chart_1")]
+        label_rgb = [c / 255 for c in palette.rgb("muted_foreground")]
 
         if not self._values:
             return
@@ -57,7 +78,7 @@ class BarChart(Gtk.DrawingArea):
         gap = 6
         bar_w = max(4, (width - gap * (n + 1)) / n)
 
-        cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.9)
+        cr.set_source_rgba(*bar_rgb, 0.9)
         for i, v in enumerate(self._values):
             bar_h = (v / max_v) * plot_h if max_v else 0
             x = gap + i * (bar_w + gap)
@@ -65,7 +86,7 @@ class BarChart(Gtk.DrawingArea):
             self._rounded_rect(cr, x, y, bar_w, bar_h, 4)
             cr.fill()
 
-        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.8)
+        cr.set_source_rgba(*label_rgb, 1.0)
         cr.set_font_size(11)
         for i, label in enumerate(self._labels):
             x = gap + i * (bar_w + gap)

@@ -4,6 +4,90 @@ Versions follow semantic versioning. The version lives in `pyproject.toml`,
 `PKGBUILD` (`pkgver`) and `screentime/__init__.py` (`__version__`);
 `tests/test_version.py` fails if they disagree.
 
+## 1.3.0 — Encrypted local database; 12 more themes
+
+**Data protection** (details and limits in the README)
+* The usage database is now AES-256-GCM encrypted at rest (`python-cryptography`,
+  an official Arch package; no SQLCipher/AUR). `screentime.sec` is a SQLite file
+  holding only authenticated ciphertext; each process rebuilds an in-memory SQL
+  view by replaying a snapshot plus records, so all existing queries work
+  unchanged. Records are bound to the store and their position, so tampering,
+  reordering, removal from the middle and cross-store moves are detected; wrong
+  key vs. tampering are distinguished.
+* Daemon and GUI stay consistent through a cross-process write lock,
+  catch-up-before-write, and `PRAGMA data_version`; the daemon compacts the log
+  into encrypted snapshots; `kill -9` mid-write leaves a consistent store.
+* Key: random 256 bits, kept in the system keyring (Secret Service / KWallet)
+  or, when none can be used silently, a 0600 key file in the config directory
+  (flagged as weaker in Settings, with a one-click move to the keyring). The
+  daemon never shows a keyring dialog: it waits and retries while the keyring is
+  locked, and Settings shows "Paused" with an Unlock button.
+* Recovery key (checksummed Base32), GUI recovery screen, and the
+  `screentime-security` CLI (`status`, `verify`, `export-recovery-key`,
+  `import-recovery-key`, `move-key-to-keyring`, `compact`).
+* Migration of an existing plaintext `screentime.db`: integrity check, build
+  under a temp name, verify row-by-row using the key fetched back from the
+  keystore, atomic swap, then overwrite-and-delete the plaintext, `-wal`,
+  `-shm`, `-journal`. Any failure leaves the original untouched; an interrupted
+  run is finished next start (unless the plaintext changed meanwhile).
+* A bare `Database()` now raises instead of silently creating a plaintext file;
+  `diagnose.sh` and `uninstall.sh` were updated (uninstall also deletes the key).
+* Daemon exits with status 78 (not restart-looped) when the key is lost.
+
+**Bugs found and fixed while testing this**
+* Shutdown: the early SIGTERM handler raised `SystemExit`. Raised inside
+  PyGObject's C-backed code (`GLib.Variant`) it was silently discarded or crashed
+  the interpreter (exit -11), leaving a daemon that ignored stop requests. The
+  handler now only sets a flag, checked at startup's own safe points and inside
+  every wait loop (sliced sleeps, the setup-lock wait). 300 start/SIGTERM
+  cycles in the failing environment: 0 abnormal exits (previously ~25% failed).
+* First-time store creation is atomic (built under a temp name); a zero-byte
+  leftover is replaced.
+* Hardened the container: malformed record columns and impossible nonce lengths
+  are reported as tampering instead of raw sqlite3/ValueError crashes; a
+  WAL-mode image is normalized before loading into memory.
+* The "waiting for the keyring" warning is logged once (then every 5 minutes),
+  not on every poll.
+* `KeyNotFoundError` now gives recovery guidance in the CLI and GUI.
+
+**Themes:** Nord, Dracula, Solarized Dark/Light, Catppuccin Mocha/Latte, Tokyo
+Night, One Dark, Rose Pine / Rose Pine Dawn, High Contrast Dark/Light (held to
+7:1, WCAG AAA). 18 themes in total.
+
+**Tests:** the whole existing suite also passes on the encrypted backend
+(`SCREENTIME_TEST_PROTECTED=1`), plus a Secret Service integration test against
+a real gnome-keyring in a private D-Bus session.
+
+## 1.2.0 — Themes, KDE system colors, custom accent
+
+* New theme system (`screentime/theme.py`, pure Python) with semantic color
+  tokens (background, surface, foreground, muted, accent + hover/active, border,
+  success/warning/error, selected, headerbar, sidebar, app-row, chart_1..6).
+  Views/widgets consume tokens or generated CSS classes; a test fails if a color
+  literal appears in any GUI module. The bar chart no longer hard-codes colors.
+* Built-in themes: System (follows the desktop), ScreenTime (default), Light,
+  Dark, Gruvbox Dark, Gruvbox Light. Adding a theme is one `register_theme()`
+  call; invalid themes are rejected at registration.
+* System theme reads KDE Plasma's color scheme (`kdeglobals`, including
+  `AccentColor`), maps it onto the tokens (table in the README, generated from
+  code), merges `kdedefaults`/`XDG_CONFIG_DIRS`, and re-themes the open window
+  when the Plasma scheme changes. Falls back to the system light/dark preference
+  and accent (libadwaita >= 1.6) elsewhere.
+* Custom accent via the standard GTK color chooser; text on the accent and the
+  accent-as-text are contrast-corrected so any pick stays readable; the value is
+  validated `#rrggbb` only (cannot inject CSS).
+* Settings -> Appearance: Theme, Color scheme (disabled and showing the fixed
+  scheme for fixed themes), Accent color, live preview, Reset. Persisted in the
+  existing `settings` table (`theme`, `color_scheme`, `accent_color`), with
+  validation and non-destructive fallback for stale values.
+* Libadwaita named colors are overridden, restyling stock widgets (headerbar,
+  sidebar, cards, buttons); CSS variables are also emitted on GTK >= 4.16.
+* Tests: pure theme/KDE/config tests plus GTK tests (every theme x scheme parsed
+  as CSS by GTK, live switching, Plasma file-replace watching, Settings widgets,
+  chart pixel colors). Mutation-checked.
+* Fixed while building: the process-wide theme manager was bound to the first
+  database it saw; it is now keyed by database.
+
 ## 1.1.0 — Reliable sleep/resume; upgrades restart the daemon; Steam diagnostics
 
 * Sleep/resume: logind delay inhibitor so the session closes before the system

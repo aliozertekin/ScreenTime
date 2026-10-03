@@ -7,9 +7,10 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gio
 
-from ..db import Database
 from ..config import Config
+from .. import storage
 from .window import MainWindow
+from .theme_manager import ThemeManager, set_theme_manager
 from .tray import try_create_indicator
 from .. import wayland_setup
 from .. import autostart
@@ -22,10 +23,13 @@ class ScreenTimeApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id="org.screentime.App", flags=Gio.ApplicationFlags.FLAGS_NONE)
         # recover_orphans=False: only the daemon may close open sessions.
-        self.db = Database(recover_orphans=False)
+        # interactive: the GUI (unlike the daemon) may show the keyring's own
+        # unlock / create dialog.
+        self.db = storage.open_database(recover_orphans=False, interactive=True)
         self.config = Config(self.db)
         wayland_setup.auto_install_if_needed(self.db)
         self.window: MainWindow | None = None
+        self.theme: ThemeManager | None = None
         self._indicator = None
         self.connect("activate", self._on_activate)
 
@@ -49,6 +53,12 @@ class ScreenTimeApp(Adw.Application):
 
     def _on_activate(self, app):
         if self.window is None:
+            # Theme first (needs the display, which exists by activate) so the
+            # window is created already themed -- no flash of the wrong colors.
+            self.theme = ThemeManager(self.config)
+            set_theme_manager(self.theme)
+            self.theme.apply()
+            self.theme.start_watching()
             self._reconcile_autostart()
             self.window = MainWindow(self, self.db)
             self.window.connect("close-request", self._on_close_request)
@@ -76,13 +86,23 @@ class ScreenTimeApp(Adw.Application):
             self.window.present()
 
     def _quit(self):
+        if self.theme is not None:
+            self.theme.close()
         self.db.close()
         self.quit()
 
 
+_OPEN_ERRORS = (storage.StorageError, storage.SecureStoreError, storage.KeyStoreError)
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    app = ScreenTimeApp()
+    try:
+        app = ScreenTimeApp()
+    except _OPEN_ERRORS as e:
+        log.error("cannot open the protected database: %s", e)
+        from .unlock import LockedApp
+        return LockedApp(e).run(None)
     return app.run(None)
 
 

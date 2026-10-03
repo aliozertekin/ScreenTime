@@ -3,20 +3,28 @@ from __future__ import annotations
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw, Gdk, GLib
 import datetime
 
 from ...db import Database
 from ...config import Config
 from ... import autostart
 from ... import wayland_setup
+from ... import theme as theme_mod
+from ... import storage
+from ...keystore import KeyManager, KeyStoreError
+from ...secure_log import SecureStoreError
+from ..theme_manager import ensure_theme_manager
+from ..widgets.bar_chart import BarChart
 
 
 class SettingsView(Gtk.Box):
-    def __init__(self, db: Database, config: Config):
+    def __init__(self, db: Database, config: Config, theme_manager=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         self.db = db
         self.config = config
+        self.theme_manager = theme_manager or ensure_theme_manager(config)
+        self._syncing = False
         self.set_margin_top(24)
         self.set_margin_bottom(24)
         self.set_margin_start(24)
@@ -30,6 +38,9 @@ class SettingsView(Gtk.Box):
         col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         scroller.set_child(col)
         self.append(scroller)
+
+        col.append(self._build_appearance_group())
+        col.append(self._build_security_group())
 
         # ---- Tracking behavior -------------------------------------------------
         tracking_group = Adw.PreferencesGroup(title="Tracking")
@@ -153,6 +164,240 @@ class SettingsView(Gtk.Box):
         privacy_group.add(privacy_row)
         col.append(privacy_group)
 
+
+
+    # ---- Security ------------------------------------------------------------
+    def _build_security_group(self):
+        group = Adw.PreferencesGroup(
+            title="Security",
+            description="Your usage data is encrypted on disk. It is decrypted only in memory while ScreenTime runs.")
+        self._sec_protect_row = Adw.ActionRow(title="Database protection")
+        self._sec_key_row = Adw.ActionRow(title="Key storage")
+        self._sec_move_btn = Gtk.Button(label="Move to keyring", valign=Gtk.Align.CENTER)
+        self._sec_move_btn.connect("clicked", self._on_move_key)
+        self._sec_key_row.add_suffix(self._sec_move_btn)
+        self._sec_state_row = Adw.ActionRow(title="Tracking")
+        self._sec_unlock_btn = Gtk.Button(label="Unlock", valign=Gtk.Align.CENTER)
+        self._sec_unlock_btn.connect("clicked", self._on_unlock_keyring)
+        self._sec_state_row.add_suffix(self._sec_unlock_btn)
+        self._sec_legacy_row = Adw.ActionRow(title="Plaintext copy found")
+        recovery_row = Adw.ActionRow(
+            title="Recovery key",
+            subtitle="If the key is lost the data cannot be recovered. Save a recovery key somewhere safe, offline.")
+        rec_btn = Gtk.Button(label="Show recovery key", valign=Gtk.Align.CENTER)
+        rec_btn.connect("clicked", self._on_show_recovery_key)
+        recovery_row.add_suffix(rec_btn)
+        for row in (self._sec_protect_row, self._sec_key_row, self._sec_state_row, self._sec_legacy_row, recovery_row):
+            group.add(row)
+        self._refresh_security_rows()
+        return group
+
+    def _refresh_security_rows(self):
+        if not self.db.protected:
+            self._sec_protect_row.set_subtitle("Not protected (plain SQLite file: development/test mode)")
+            for w in (self._sec_key_row, self._sec_state_row, self._sec_legacy_row):
+                w.set_visible(False)
+            return
+        st = storage.security_status()
+        self._sec_protect_row.set_subtitle(
+            f"Encrypted with AES-256-GCM ({st.store_bytes / 1024:.0f} KiB on disk)")
+        keyring = st.backend == "secret-service"
+        self._sec_key_row.set_subtitle(
+            "System keyring (Secret Service / KWallet)" if keyring else
+            "Key file \u2014 weaker: anyone who can read your home directory can read the data. "
+            "Move the key into the keyring for stronger protection.")
+        self._sec_move_btn.set_visible(st.backend == "keyfile")
+        waiting = st.state in ("waiting", "key-missing", "wrong-key")
+        self._sec_state_row.set_visible(waiting)
+        if waiting:
+            self._sec_state_row.set_subtitle(
+                {"waiting": "Paused: waiting for the keyring to unlock. Nothing is tracked until it does.",
+                 "key-missing": "Paused: the database key was not found. Restore it with your recovery key.",
+                 "wrong-key": "Paused: the stored key does not open the database."}[st.state])
+            self._sec_unlock_btn.set_visible(st.state == "waiting")
+        self._sec_legacy_row.set_visible(st.legacy_plaintext_present)
+        if st.legacy_plaintext_present:
+            self._sec_legacy_row.set_subtitle(
+                "An unencrypted screentime.db is still next to the protected database (an older ScreenTime "
+                "may still be running). Restart the daemon; if it persists, delete that file yourself.")
+
+    def _alert(self, heading, body, extra=None):
+        root = self.get_root()
+        if hasattr(Adw, "AlertDialog"):
+            d = Adw.AlertDialog(heading=heading, body=body)
+            d.add_response("close", "Close")
+            d.set_default_response("close")
+            if extra is not None:
+                d.set_extra_child(extra)
+            d.present(root)
+        else:                                               # libadwaita < 1.5
+            d = Adw.MessageDialog(transient_for=root, heading=heading, body=body)
+            d.add_response("close", "Close")
+            if extra is not None:
+                d.set_extra_child(extra)
+            d.present()
+
+    def _on_show_recovery_key(self, _btn):
+        try:
+            key = storage.export_recovery_key()
+        except (SecureStoreError, KeyStoreError, storage.StorageError) as e:
+            self._alert("Can't read the key", storage.explain_open_error(e))
+            return
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        label = Gtk.Label(label=key, selectable=True, wrap=True, max_width_chars=30)
+        label.add_css_class("monospace")
+        label.add_css_class("title-4")
+        box.append(label)
+        copy = Gtk.Button(label="Copy to clipboard", halign=Gtk.Align.CENTER)
+        copy.connect("clicked", lambda *_: self.get_clipboard().set(key))
+        box.append(copy)
+        self._alert("Recovery key",
+                    "Anyone who has this can read your ScreenTime data. Keep it offline and private. "
+                    "It is the only way back if your keyring or key file is lost.", box)
+
+    def _on_move_key(self, _btn):
+        try:
+            store_id = storage.read_store_id(storage.store_path())
+            backend = KeyManager().move_to_keyring(store_id)
+        except (SecureStoreError, KeyStoreError, storage.StorageError) as e:
+            self._alert("Key not moved", f"{storage.explain_open_error(e)}\n\nThe key file was kept.")
+        else:
+            self._alert("Key moved", f"The key is now kept in: {backend}. The key file was securely removed.")
+        self._refresh_security_rows()
+
+    def _on_unlock_keyring(self, _btn):
+        try:
+            KeyManager().get_key(storage.read_store_id(storage.store_path()), interactive=True)
+        except (SecureStoreError, KeyStoreError, storage.StorageError) as e:
+            self._alert("Still locked", storage.explain_open_error(e))
+        else:
+            self._alert("Unlocked", "Tracking resumes within a few seconds.")
+        self._refresh_security_rows()
+
+    # ---- Appearance ----------------------------------------------------------
+    SCHEME_CHOICES = (("system", "Follow system"), ("light", "Light"), ("dark", "Dark"))
+
+    def _build_appearance_group(self):
+        group = Adw.PreferencesGroup(
+            title="Appearance",
+            description="Theme, color scheme and accent color are three independent choices.")
+        self._themes = theme_mod.list_themes()
+
+        self._theme_row = Adw.ComboRow(title="Theme")
+        self._theme_row.set_model(Gtk.StringList.new([t.name for t in self._themes]))
+        self._theme_row.connect("notify::selected", self._on_theme_selected)
+        group.add(self._theme_row)
+
+        self._scheme_row = Adw.ComboRow(title="Color scheme")
+        self._scheme_row.set_model(Gtk.StringList.new([label for _k, label in self.SCHEME_CHOICES]))
+        self._scheme_row.connect("notify::selected", self._on_scheme_selected)
+        group.add(self._scheme_row)
+
+        self._accent_row = Adw.ActionRow(title="Accent color")
+        dialog = Gtk.ColorDialog()
+        dialog.set_title("Choose accent color")
+        dialog.set_with_alpha(False)
+        self._accent_btn = Gtk.ColorDialogButton(dialog=dialog, valign=Gtk.Align.CENTER)
+        self._accent_btn.connect("notify::rgba", self._on_accent_picked)
+        self._accent_clear_btn = Gtk.Button(label="Use theme accent", valign=Gtk.Align.CENTER)
+        self._accent_clear_btn.connect("clicked", self._on_accent_cleared)
+        self._accent_row.add_suffix(self._accent_clear_btn)
+        self._accent_row.add_suffix(self._accent_btn)
+        group.add(self._accent_row)
+
+        group.add(self._build_preview())
+
+        reset_row = Adw.ActionRow(title="Reset appearance",
+                                  subtitle="Back to the ScreenTime theme, following the system color scheme, theme accent")
+        reset_btn = Gtk.Button(label="Reset", valign=Gtk.Align.CENTER)
+        reset_btn.connect("clicked", self._on_appearance_reset)
+        reset_row.add_suffix(reset_btn)
+        group.add(reset_row)
+
+        self.theme_manager.connect_changed(lambda _p: self._sync_appearance_rows())
+        self._sync_appearance_rows()
+        return group
+
+    def _build_preview(self):
+        """A live preview drawn with the same semantic tokens as the rest of the
+        app -- it can't disagree with the real UI because it *is* the real widgets."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.add_css_class("st-preview")
+        box.set_margin_top(6)
+        title = Gtk.Label(label="Preview", xalign=0)
+        title.add_css_class("heading")
+        box.append(title)
+
+        def swatches(tokens):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            for tok in tokens:
+                sw = Gtk.Box()
+                sw.add_css_class("st-swatch")
+                sw.add_css_class("st-bg-" + tok.replace("_", "-"))
+                sw.set_tooltip_text(tok.replace("_", " "))
+                row.append(sw)
+            return row
+
+        box.append(swatches(("accent", "accent_hover", "accent_active", "success", "warning", "error")))
+        box.append(swatches(("chart_1", "chart_2", "chart_3", "chart_4", "chart_5", "chart_6")))
+        chart = BarChart(height=120)
+        chart.set_data(["M", "T", "W", "T", "F", "S", "S"], [3, 5, 2, 6, 4, 1, 2])
+        box.append(chart)
+        return box
+
+    def _sync_appearance_rows(self):
+        """Make the controls reflect the config/theme (used after any change,
+        including a reset). Guarded so it doesn't re-trigger the handlers."""
+        self._syncing = True
+        try:
+            theme = self.theme_manager.theme
+            self._theme_row.set_selected(next((i for i, t in enumerate(self._themes) if t.id == theme.id), 0))
+            self._theme_row.set_subtitle(theme.description)
+
+            keys = [k for k, _ in self.SCHEME_CHOICES]
+            # A fixed theme *is* one scheme: show that, not the stored preference
+            # (which is kept, and applies again once an adaptive theme is chosen).
+            shown = theme.fixed_scheme or self.config.color_scheme
+            self._scheme_row.set_selected(keys.index(shown))
+            if theme.fixed_scheme:
+                self._scheme_row.set_sensitive(False)
+                self._scheme_row.set_subtitle(f"Fixed by the {theme.name} theme ({theme.fixed_scheme})")
+            else:
+                self._scheme_row.set_sensitive(True)
+                self._scheme_row.set_subtitle("Light or dark; \"Follow system\" tracks your desktop")
+
+            palette = self.theme_manager.palette
+            rgba = Gdk.RGBA()
+            rgba.parse(palette.accent)
+            self._accent_btn.set_rgba(rgba)
+            custom = self.config.accent_color
+            self._accent_clear_btn.set_sensitive(bool(custom))
+            self._accent_row.set_subtitle(f"Custom ({custom})" if custom else f"From the theme ({palette.accent})")
+        finally:
+            self._syncing = False
+
+    def _on_theme_selected(self, row, _pspec):
+        if self._syncing:
+            return
+        self.theme_manager.set_theme(self._themes[row.get_selected()].id)
+
+    def _on_scheme_selected(self, row, _pspec):
+        if self._syncing:
+            return
+        self.theme_manager.set_color_scheme(self.SCHEME_CHOICES[row.get_selected()][0])
+
+    def _on_accent_picked(self, btn, _pspec):
+        if self._syncing:
+            return
+        rgba = btn.get_rgba()
+        self.theme_manager.set_accent_color(theme_mod.to_hex((rgba.red * 255, rgba.green * 255, rgba.blue * 255)))
+
+    def _on_accent_cleared(self, _btn):
+        self.theme_manager.set_accent_color(None)
+
+    def _on_appearance_reset(self, _btn):
+        self.theme_manager.reset()
+
     def _on_idle_changed(self, row, _pspec):
         self.config.set("idle_timeout_seconds", int(row.get_value()))
 
@@ -174,6 +419,7 @@ class SettingsView(Gtk.Box):
         self._daemon_btn.set_label("Stop" if running else "Start")
         self._refresh_backend_rows()
         self._refresh_startup_rows()
+        self._refresh_security_rows()
 
     def _refresh_startup_rows(self):
         st = autostart.get_status(self.db)

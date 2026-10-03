@@ -1,6 +1,6 @@
 # Maintainer: You <you@example.com>
 pkgname=screentime
-pkgver=1.1.0
+pkgver=1.3.0
 pkgrel=1
 pkgdesc="A native, fully local application usage tracker (Screen Time for Linux)"
 arch=('any')
@@ -12,6 +12,7 @@ depends=(
     'python-psutil'
     'python-gobject'
     'python-cairo'
+    'python-cryptography'   # AES-256-GCM for the protected database (official repo; no AUR needed)
     'gtk4'
     'libadwaita'
     'python-xlib'          # X11 active-window/idle detection
@@ -25,6 +26,8 @@ optdepends=(
     'hyprland: native Wayland focus detection under Hyprland'
     'gnome-shell: install the bundled GNOME Shell extension for Wayland focus detection'
     'plasma-workspace: install the bundled KWin script for Wayland focus detection'
+    'kwallet: keep the database key in KWallet (enable its Secret Service interface); any Secret Service provider works'
+    'gnome-keyring: keep the database key in GNOME Keyring'
 )
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
 # This PKGBUILD builds straight from the source tree it ships alongside --
