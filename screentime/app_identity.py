@@ -46,8 +46,6 @@ def _canonicalize(raw: str) -> str:
 def _desktop_file_index() -> dict:
     """Maps canonical keys (from StartupWMClass, Exec basename, and the
     .desktop filename itself) -> parsed (name, icon, path)."""
-    if _platform.is_windows():
-        return {}                   # no .desktop files; Windows names come from the exe's version info
     search_dirs = [
         "/usr/share/applications",
         "/usr/local/share/applications",
@@ -56,6 +54,20 @@ def _desktop_file_index() -> dict:
         str(Path.home() / ".local/share/flatpak/exports/share/applications"),
     ]
     return _build_index_from_dirs(search_dirs)
+
+
+def _current_index() -> dict:
+    """The .desktop index for the platform running *right now*.
+
+    The platform check deliberately lives OUTSIDE the lru_cache'd
+    `_desktop_file_index`: a cached Linux index must never be served once the
+    platform is Windows (tests flip `SCREENTIME_PLATFORM` in-process, and a
+    stale hit made a host's "Firefox Web Browser" .desktop entry override the
+    detector's friendly name). Windows has no .desktop files; its names come
+    from the exe's version info (`RawFocus.display_hint`)."""
+    if _platform.is_windows():
+        return {}
+    return _desktop_file_index()
 
 
 def _build_index_from_dirs(search_dirs: list[str]) -> dict:
@@ -116,7 +128,7 @@ def resolve(raw_identifier: str, fallback_display: Optional[str] = None,
     pid (optional): the focused window's process, used to recognise games
     Steam launched whose window class doesn't mention Steam."""
     key = _canonicalize(raw_identifier)
-    idx = _desktop_file_index()
+    idx = _current_index()
     if key in idx:
         name, icon, path = idx[key]
         return ResolvedApp(key=key, display_name=name, icon_name=icon, desktop_file=path)

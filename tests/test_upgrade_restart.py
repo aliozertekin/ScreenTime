@@ -3,6 +3,7 @@ daemon, so fixes appeared not to work until the next login. These tests cover
 detecting that (version handshake via the settings table), restarting safely,
 and the pacman post-upgrade script."""
 import os
+import shutil
 import stat
 import subprocess
 import textwrap
@@ -125,8 +126,14 @@ def _fake_bin(tmp_path, loginctl_out, systemctl_rc=0, with_loginctl=True):
 
 
 def _run_post_upgrade(bindir, path_only=True):
-    env = {"PATH": f"{bindir}:/usr/bin:/bin" if path_only else "/usr/bin:/bin"}
-    return subprocess.run(["bash", "-c", f"source {ROOT / 'screentime.install'}; post_upgrade"],
+    # Hermetic: the script only needs shell builtins plus the stubs in bindir
+    # (loginctl/systemctl/timeout). Do NOT add /usr/bin or /bin -- a real host
+    # loginctl there (CI runners are systemd hosts with a logged-in user) would
+    # make "loginctl is unavailable" untrue and the script would rightly restart
+    # that user's daemon. bash is launched by absolute path because subprocess
+    # resolves the executable through the child's PATH.
+    env = {"PATH": str(bindir) if path_only else "/nonexistent"}
+    return subprocess.run([shutil.which("bash"), "-c", f"source {ROOT / 'screentime.install'}; post_upgrade"],
                           capture_output=True, text=True, env=env)
 
 
@@ -149,6 +156,31 @@ def test_post_upgrade_without_loginctl_is_a_noop(tmp_path):
     b, log = _fake_bin(tmp_path, "", with_loginctl=False)
     r = _run_post_upgrade(b)
     assert r.returncode == 0 and not log.exists()
+
+
+def test_post_upgrade_with_no_logged_in_users_is_a_quiet_noop(tmp_path):
+    b, log = _fake_bin(tmp_path, "")
+    r = _run_post_upgrade(b)
+    assert r.returncode == 0 and not log.exists() and "restarted" not in r.stdout
+
+
+def test_post_upgrade_ignores_malformed_loginctl_output(tmp_path):
+    b, log = _fake_bin(tmp_path, "Failed to connect to bus")        # "uid" is not numeric
+    r = _run_post_upgrade(b)
+    assert r.returncode == 0 and not log.exists()
+
+
+def test_post_upgrade_with_unusable_loginctl_never_fails(tmp_path):
+    b, log = _fake_bin(tmp_path, "")
+    (b / "loginctl").write_text("#!/bin/sh\nexit 1\n")
+    r = _run_post_upgrade(b)
+    assert r.returncode == 0 and not log.exists()
+
+
+def test_post_upgrade_without_systemctl_is_a_noop(tmp_path):
+    b, log = _fake_bin(tmp_path, "1000 alice no active")
+    (b / "systemctl").unlink()
+    assert _run_post_upgrade(b).returncode == 0 and not log.exists()
 
 
 def test_pkgbuild_ships_the_install_script():

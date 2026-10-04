@@ -6,14 +6,28 @@
 # appeared not to work). Restart it for every logged-in user.
 
 post_upgrade() {
+    # Nothing to restart without systemd's login manager / service manager.
     command -v loginctl >/dev/null 2>&1 || return 0
-    loginctl list-users --no-legend 2>/dev/null | while read -r uid user _rest; do
+    command -v systemctl >/dev/null 2>&1 || return 0
+
+    # An unusable loginctl (no bus, chroot, container) or an empty user list
+    # means there is no session to restart: succeed without touching systemctl.
+    local users
+    users=$(loginctl list-users --no-legend 2>/dev/null) || return 0
+    [ -n "$users" ] || return 0
+
+    local uid user _rest restarted=0
+    while read -r uid user _rest; do
+        # Only well-formed "<numeric uid> <name> ..." rows are real sessions.
+        case "$uid" in ''|*[!0-9]*) continue ;; esac
         [ -n "$user" ] || continue
         # try-restart: only acts if the service is currently active, so users
         # who stopped tracking on purpose are left alone. Never fail the upgrade.
         timeout 20 systemctl --user --machine="${user}@.host" try-restart screentime-daemon.service \
             >/dev/null 2>&1 || true
-    done
-    echo ":: screentime: running daemons were restarted to load the new version."
+        restarted=1
+    done <<< "$users"
+
+    [ "$restarted" -eq 0 ] || echo ":: screentime: running daemons were restarted to load the new version."
     return 0
 }

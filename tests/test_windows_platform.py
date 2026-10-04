@@ -209,6 +209,29 @@ def test_windows_identity_keeps_key_and_uses_hint_as_display(monkeypatch):
         app_identity._desktop_file_index.cache_clear()
 
 
+def test_windows_hint_wins_over_a_stale_cached_linux_desktop_index(monkeypatch):
+    """The Linux .desktop index is lru_cached; once it has been built (any earlier
+    test, or a host that ships a Firefox .desktop file) a Windows resolve() must
+    still ignore it and honour the detector's display_hint, with no cache_clear()."""
+    from screentime import app_identity
+    host_entry = {"firefox": ("Firefox Web Browser", "firefox", "/usr/share/applications/firefox.desktop")}
+    monkeypatch.setattr(app_identity, "_build_index_from_dirs", lambda dirs: host_entry)
+    try:
+        monkeypatch.setenv("SCREENTIME_PLATFORM", "linux")
+        plat.reset_for_tests()
+        app_identity._desktop_file_index.cache_clear()
+        assert app_identity.resolve("firefox", fallback_display="Firefox").display_name == "Firefox Web Browser"
+
+        monkeypatch.setenv("SCREENTIME_PLATFORM", "windows")          # cache still holds the Linux index
+        plat.reset_for_tests()
+        r = app_identity.resolve("firefox", fallback_display="Firefox")
+        assert (r.key, r.display_name, r.desktop_file) == ("firefox", "Firefox", None)
+    finally:
+        monkeypatch.delenv("SCREENTIME_PLATFORM")
+        plat.reset_for_tests()
+        app_identity._desktop_file_index.cache_clear()
+
+
 def test_process_presence_uses_the_same_identifier_as_the_foreground_detector(monkeypatch):
     monkeypatch.setenv("SCREENTIME_PLATFORM", "windows")
     plat.reset_for_tests()
