@@ -163,7 +163,7 @@ def test_plain_sqlite_database_is_not_mistaken_for_a_store(tmp_path):
 def test_flipping_any_ciphertext_bit_is_detected(store):
     add(store, b"alpha", b"beta")
     store.close()
-    raw_update(store.path, "UPDATE events SET ct = CAST(X'00' || substr(ct, 2) AS BLOB) WHERE id = 2")
+    raw_update(store.path, "UPDATE events SET ct = CAST((CASE WHEN substr(ct, 1, 1) = X'00' THEN X'01' ELSE X'00' END) || substr(ct, 2) AS BLOB) WHERE id = 2")
     log = SecureLog(store.path, KEY)
     with pytest.raises(TamperError):
         list(log.events_after(0))
@@ -229,7 +229,7 @@ def test_tampering_with_a_snapshot_chunk_is_detected(store):
     sid = store.write_snapshot(0, os.urandom(2_500_000))
     store.commit()
     store.close()
-    raw_update(store.path, "UPDATE snapshot_chunks SET ct = CAST(X'00' || substr(ct, 2) AS BLOB) WHERE snapshot_id=? AND idx=1", (sid,))
+    raw_update(store.path, "UPDATE snapshot_chunks SET ct = CAST((CASE WHEN substr(ct, 1, 1) = X'00' THEN X'01' ELSE X'00' END) || substr(ct, 2) AS BLOB) WHERE snapshot_id=? AND idx=1", (sid,))
     log = SecureLog(store.path, KEY)
     with pytest.raises(TamperError):
         log.read_snapshot(sid)
@@ -287,7 +287,7 @@ def test_verify_all_authenticates_everything_and_fails_on_damage(store):
     add(store, b"c")
     assert store.verify_all() == {"snapshot_bytes": 4, "events": 1}
     store.close()
-    raw_update(store.path, "UPDATE events SET ct = CAST(X'00' || substr(ct, 2) AS BLOB)")
+    raw_update(store.path, "UPDATE events SET ct = CAST((CASE WHEN substr(ct, 1, 1) = X'00' THEN X'01' ELSE X'00' END) || substr(ct, 2) AS BLOB)")
     log = SecureLog(store.path, KEY)
     with pytest.raises(TamperError):
         log.verify_all()
@@ -401,3 +401,14 @@ def test_snapshot_chunk_of_wrong_type_is_tampering(store):
     with pytest.raises(TamperError):
         log.read_snapshot(sid)
     log.close()
+
+
+def test_damage_helper_changes_the_first_byte_whatever_it_was():
+    """Regression: the tamper tests overwrite the first ciphertext byte with 0x00. Ciphertext is random, so one run in
+    256 the byte already WAS 0x00, the 'damage' was a no-op and the test failed with 'DID NOT RAISE'."""
+    import sqlite3
+    expr = "CAST((CASE WHEN substr(ct, 1, 1) = X'00' THEN X'01' ELSE X'00' END) || substr(ct, 2) AS BLOB)"
+    con = sqlite3.connect(":memory:")
+    for first in range(256):
+        ct = bytes([first]) + b"rest-of-ciphertext"
+        assert con.execute(f"SELECT {expr} FROM (SELECT ? AS ct)", (ct,)).fetchone()[0] != ct

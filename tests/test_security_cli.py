@@ -41,7 +41,7 @@ def test_verify_ok_then_fails_after_tampering(capsys, protected):
     rc, out, _ = run(capsys, "verify")
     assert rc == 0 and out.startswith("OK")
     con = sqlite3.connect(protected)
-    con.execute("UPDATE events SET ct = CAST(X'00' || substr(ct, 2) AS BLOB) WHERE id = 1")
+    con.execute("UPDATE events SET ct = CAST((CASE WHEN substr(ct, 1, 1) = X'00' THEN X'01' ELSE X'00' END) || substr(ct, 2) AS BLOB) WHERE id = 1")
     con.commit()
     con.close()
     rc, _out, err = run(capsys, "verify")

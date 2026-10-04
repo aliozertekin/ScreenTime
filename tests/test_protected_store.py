@@ -304,7 +304,7 @@ def test_tampering_after_compaction_is_still_detected(p):
     db.close()
     import sqlite3
     con = sqlite3.connect(p)
-    con.execute("UPDATE snapshot_chunks SET ct = CAST(X'00' || substr(ct, 2) AS BLOB)")
+    con.execute("UPDATE snapshot_chunks SET ct = CAST((CASE WHEN substr(ct, 1, 1) = X'00' THEN X'01' ELSE X'00' END) || substr(ct, 2) AS BLOB)")
     con.commit()
     con.close()
     with pytest.raises(TamperError):

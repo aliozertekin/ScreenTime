@@ -499,7 +499,7 @@ def test_verify_store_authenticates_and_detects_damage(dirs):
     db.close()
     assert storage.verify_store(dd, km, interactive=False)["events"] >= 5
     con = sqlite3.connect(dd / "screentime.sec")
-    con.execute("UPDATE events SET ct = CAST(X'00' || substr(ct, 2) AS BLOB) WHERE id = 3")
+    con.execute("UPDATE events SET ct = CAST((CASE WHEN substr(ct, 1, 1) = X'00' THEN X'01' ELSE X'00' END) || substr(ct, 2) AS BLOB) WHERE id = 3")
     con.commit()
     con.close()
     with pytest.raises(TamperError):
