@@ -18,9 +18,20 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("screentime-smoke-" + [guid]::NewGu
 New-Item -ItemType Directory -Force "$tmp\L","$tmp\R" | Out-Null
 $env:LOCALAPPDATA = "$tmp\L"; $env:APPDATA = "$tmp\R"
 
+# Start-Process -ArgumentList joins an array with plain spaces WITHOUT quoting, so `-c "import gi; ..."` reached Python
+# as `-c import gi; ...` and python saw only `import` ("SyntaxError: Expected one or more names after 'import'").
+# Quote each argument the way the Windows C runtime parses a command line.
+function ConvertTo-QuotedArg([string]$a) {
+  if ($a -ne "" -and $a -notmatch '[\s"]') { return $a }
+  $a = $a -replace '(\\*)"', '$1$1\"'      # backslashes before a quote are doubled, the quote is escaped
+  $a = $a -replace '(\\+)$', '$1$1'         # trailing backslashes are doubled before the closing quote
+  return '"' + $a + '"'
+}
+
 function Run-Cli($root, [string[]]$args_) {
   $exe = Join-Path $root "bin\screentime-cli.exe"
-  $p = Start-Process -FilePath $exe -ArgumentList $args_ -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$tmp\out.txt" -RedirectStandardError "$tmp\err.txt"
+  $argLine = ($args_ | ForEach-Object { ConvertTo-QuotedArg $_ }) -join " "
+  $p = Start-Process -FilePath $exe -ArgumentList $argLine -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$tmp\out.txt" -RedirectStandardError "$tmp\err.txt"
   # Get-Content -Raw yields $null (not "") for an empty file -- and [string](...) keeps it $null -- while the assert
   # messages below call .Trim() on these, eagerly, even when the assertion passes. A clean run has empty stderr,
   # so wrap in "$( )", which always produces a string.
