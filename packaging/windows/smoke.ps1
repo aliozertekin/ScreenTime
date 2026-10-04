@@ -100,8 +100,12 @@ $r = Run-Cli $Bundle @("-c","from screentime.platform.windows import autostart a
 Start-Sleep 2
 Assert ($d1.HasExited) "daemon stopped gracefully via the stop event"
 Assert (Test-Path "$tmp\L\ScreenTime\screentime.sec") "encrypted store exists in %LOCALAPPDATA%\ScreenTime"
-$head = [IO.File]::ReadAllBytes("$tmp\L\ScreenTime\screentime.sec")[0..15]
-Assert (-not ([Text.Encoding]::ASCII.GetString($head) -match "SQLite")) "store is not a plaintext SQLite file"
+# screentime.sec is intentionally an ordinary SQLite container (see screentime/secure_log.py): the SQLite header proves
+# nothing either way. smoke_store.py checks what does -- sealed records, a written marker absent from every file on disk,
+# every record authenticating under the stored key, no plaintext screentime.db -- with the BUNDLED interpreter.
+$r = Run-Cli $Bundle @("$PSScriptRoot\smoke_store.py")                          # Run-Cli quotes it (a checkout path may contain spaces)
+Write-Host $r.Out.TrimEnd()
+Assert ($r.Code -eq 0 -and $r.Out -match "STORE OK") "protected store is sealed: ciphertext records, marker in no file, no plaintext database ($($r.Err.Trim()))"
 
 # --- startup task: create, verify, remove (private task name so a real install is untouched)
 $r = Run-Cli $Bundle @("-c","from screentime.platform.windows import autostart as a; a.TASK_NAME='\\ScreenTimeSmoke\\Daemon'; a.start_now=lambda: True; a.enable(); i=a.query_task(); print('TASK', i.exists, i.enabled, a.task_is_current(i)); a.disable(); print('GONE', not a.query_task().exists)")
