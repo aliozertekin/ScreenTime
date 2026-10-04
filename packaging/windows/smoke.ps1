@@ -21,7 +21,10 @@ $env:LOCALAPPDATA = "$tmp\L"; $env:APPDATA = "$tmp\R"
 function Run-Cli($root, [string[]]$args_) {
   $exe = Join-Path $root "bin\screentime-cli.exe"
   $p = Start-Process -FilePath $exe -ArgumentList $args_ -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$tmp\out.txt" -RedirectStandardError "$tmp\err.txt"
-  return @{ Code = $p.ExitCode; Out = (Get-Content "$tmp\out.txt" -Raw); Err = (Get-Content "$tmp\err.txt" -Raw) }
+  # Get-Content -Raw yields $null (not "") for an empty file -- and [string](...) keeps it $null -- while the assert
+  # messages below call .Trim() on these, eagerly, even when the assertion passes. A clean run has empty stderr,
+  # so wrap in "$( )", which always produces a string.
+  return @{ Code = $p.ExitCode; Out = "$(Get-Content "$tmp\out.txt" -Raw)"; Err = "$(Get-Content "$tmp\err.txt" -Raw)" }
 }
 
 if ($Mode -eq "Installer") {

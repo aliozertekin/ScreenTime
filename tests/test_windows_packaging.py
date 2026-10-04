@@ -294,6 +294,38 @@ def test_inno_setup_pin_url_and_checksum_agree():
     assert re.fullmatch(r"[0-9a-f]{64}", pins.get(exe, "")), f"toolchain.lock has no valid SHA-256 for {exe}"
 
 
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh not installed")
+def test_smoke_run_cli_never_returns_null_for_empty_output(tmp_path):
+    """Get-Content -Raw yields $null for an empty file (and [string](...) keeps it $null). smoke.ps1 calls
+    .Trim() on Run-Cli's Out/Err inside its assert messages, eagerly -- and a clean run has EMPTY stderr -- so a
+    null there killed the Windows smoke job with 'You cannot call a method on a null-valued expression'."""
+    root = tmp_path / "bundle"
+    (root / "bin").mkdir(parents=True)
+    cli = root / "bin" / "screentime-cli.exe"
+    cli.write_text("#!/bin/sh\necho 'gtk 4'\n")                        # stdout set, stderr empty: the normal case
+    cli.chmod(0o755)
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        'param($Smoke, $Root)\n$ErrorActionPreference = "Stop"\n'
+        "Invoke-Expression ([regex]::Match((Get-Content $Smoke -Raw), '(?ms)^function Run-Cli.*?^}').Value)\n"
+        '$tmp = Join-Path $Root "t"; New-Item -ItemType Directory -Force $tmp | Out-Null\n'
+        '$r = Run-Cli $Root @()\n'
+        'Write-Output "$($r.Out.Trim())|$($r.Err.Trim())"\n')
+    r = subprocess.run(["pwsh", "-NoProfile", "-File", str(harness), str(PKG / "smoke.ps1"), str(root)],
+                       capture_output=True, text=True, env={**os.environ, "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.strip() == "gtk 4|"
+
+
+def test_windows_workflow_fails_loudly_when_the_installer_is_missing():
+    """A missing installer must stop the build job at upload and show up clearly in the smoke job, never as a
+    confusing downstream error or a silently skipped smoke test."""
+    wf = (ROOT / ".github" / "workflows" / "windows.yml").read_text()
+    assert "if-no-files-found: error" in wf                            # build job: no installer -> fail at upload
+    assert "-Recurse" in wf and "ScreenTime-*-setup.exe" in wf        # smoke job: tolerate artifact nesting
+    assert "-Mode Installer" in wf                                     # and the smoke test really runs the installer
+
+
 def test_packaging_inputs_are_consistent():
     env = (PKG / "toolchain.env").read_text()
     assert "INNO_URL=" in env and "MSYS2_ENV=ucrt64" in env
