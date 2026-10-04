@@ -78,7 +78,7 @@ if ($gui.HasExited) {
   Write-Host "GUI exited with code $($gui.ExitCode) within 8 s. Evidence follows."
   foreach ($f in "gui.log","gui.crash") {
     $path = "$tmp\L\ScreenTime\logs\$f"
-    if (Test-Path $path) { Write-Host "----- $f"; Get-Content $path -Tail 60 } else { Write-Host "----- $f: not written" }
+    if (Test-Path $path) { Write-Host "----- $f"; Get-Content $path -Tail 60 } else { Write-Host "----- ${f}: not written" }
   }
   # Re-run with the console interpreter so Python/GTK messages (which pythonw discards) land in files.
   $env:GSK_RENDERER = "cairo"
