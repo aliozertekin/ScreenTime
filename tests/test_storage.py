@@ -1,4 +1,5 @@
 """Opening, creating, migrating and recovering the protected database."""
+import errno
 import hashlib
 import logging
 import os
@@ -7,6 +8,7 @@ import stat
 import subprocess
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -561,6 +563,157 @@ def test_interrupted_creation_leaves_no_half_built_store(dirs, monkeypatch):
     db = storage.open_database(data_dir_=dd, key_manager=file_km(cfg))             # and the next start just works
     assert db.protected
     db.close()
+
+
+# ------------------------------------------- directory durability (POSIX fsync vs Windows)
+def spy_directories(monkeypatch, windows=False):
+    """Record os.open() of *directories* and os.fsync() of directory fds. With windows=True, opening a directory
+    also fails the way it does on Windows (PermissionError 13), so a regression shows up on the Linux test job."""
+    real_open, real_fsync = os.open, os.fsync
+    seen = types.SimpleNamespace(opened=[], fsynced=0)
+
+    def fake_open(path, flags, *a, **kw):
+        if os.path.isdir(path):
+            seen.opened.append((Path(path), flags))
+            if windows:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_open(path, flags, *a, **kw)
+
+    def fake_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            seen.fsynced += 1
+        return real_fsync(fd)
+    monkeypatch.setattr(os, "open", fake_open)
+    monkeypatch.setattr(os, "fsync", fake_fsync)
+    return seen
+
+
+def as_windows(monkeypatch):
+    """Windows semantics for ONLY the directory-durability step (the rest of the stack stays the Linux one)."""
+    monkeypatch.setattr(storage, "_dir_fsync_supported", lambda: False)
+    return spy_directories(monkeypatch, windows=True)
+
+
+def test_posix_fsyncs_the_data_directory_after_creating_the_store(dirs, monkeypatch):
+    dd, cfg = dirs
+    seen = spy_directories(monkeypatch)
+    db = storage.open_database(data_dir_=dd, key_manager=file_km(cfg))
+    db.close()
+    assert seen.opened == [(dd, os.O_RDONLY)] and seen.fsynced == 1
+
+
+def test_posix_fsyncs_the_data_directory_after_a_migration(dirs, monkeypatch):
+    dd, cfg = dirs
+    make_legacy(dd)
+    seen = spy_directories(monkeypatch)
+    db = storage.open_database(data_dir_=dd, key_manager=file_km(cfg), recover_orphans=False)
+    db.close()
+    assert seen.opened == [(dd, os.O_RDONLY)] and seen.fsynced == 1
+
+
+def test_windows_creates_the_store_without_opening_the_directory(dirs, monkeypatch):
+    """Regression: os.open(<dir>, O_RDONLY) is PermissionError on Windows and crashed first-run creation (GUI exit 1)."""
+    dd, cfg = dirs
+    seen = as_windows(monkeypatch)
+    db = storage.open_database(data_dir_=dd, key_manager=file_km(cfg))
+    db.set_setting("hello", "world")
+    db.close()
+    assert seen.opened == [] and seen.fsynced == 0
+    db = storage.open_database(data_dir_=dd, key_manager=file_km(cfg))
+    assert db.protected and db.get_setting("hello") == "world"
+    db.close()
+
+
+def test_windows_migration_works_without_opening_the_directory(dirs, monkeypatch):
+    dd, cfg = dirs
+    make_legacy(dd)
+    want = legacy_digests(dd)
+    seen = as_windows(monkeypatch)
+    db = storage.open_database(data_dir_=dd, key_manager=file_km(cfg), recover_orphans=False)
+    assert db.protected and table_digests(db.conn) == want
+    db.close()
+    assert seen.opened == [] and not (dd / "screentime.db").exists()
+
+
+def test_directory_fsync_support_follows_the_platform(tmp_path, monkeypatch):
+    seen = spy_directories(monkeypatch)
+    monkeypatch.setenv("SCREENTIME_PLATFORM", "windows")
+    assert storage._dir_fsync_supported() is False
+    storage._fsync_dir(tmp_path)
+    assert seen.opened == []
+    monkeypatch.setenv("SCREENTIME_PLATFORM", "linux")
+    assert storage._dir_fsync_supported() is True
+    storage._fsync_dir(tmp_path)
+    assert seen.opened == [(tmp_path, os.O_RDONLY)] and seen.fsynced == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["creation", "migration"])
+def test_a_failing_os_replace_still_propagates_where_directory_fsync_is_skipped(dirs, monkeypatch, legacy):
+    dd, cfg = dirs
+    want = None
+    if legacy:
+        make_legacy(dd)
+        want = legacy_digests(dd)
+    seen = as_windows(monkeypatch)
+
+    def locked(src, dst):
+        raise PermissionError(errno.EACCES, "the target is locked by another process", str(dst))
+    monkeypatch.setattr(os, "replace", locked)
+    with pytest.raises(PermissionError, match="locked by another process"):
+        storage.open_database(data_dir_=dd, key_manager=file_km(cfg), recover_orphans=False)
+    assert not (dd / "screentime.sec").exists() and not [n for n in names_in(dd) if ".sec.new" in n or ".sec.tmp" in n]
+    if legacy:
+        assert_original_untouched(dd, want, None)
+    assert seen.opened == []
+
+
+def test_a_failing_store_creation_still_propagates_on_windows(dirs, monkeypatch):
+    dd, cfg = dirs
+    as_windows(monkeypatch)
+
+    def disk_full(*a, **kw):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(storage, "SecureLog", disk_full)
+    with pytest.raises(OSError) as e:
+        storage.open_database(data_dir_=dd, key_manager=file_km(cfg))
+    assert e.value.errno == errno.ENOSPC and not (dd / "screentime.sec").exists()
+
+
+def test_a_failing_key_creation_still_propagates_on_windows(dirs, monkeypatch):
+    dd, cfg = dirs
+    as_windows(monkeypatch)
+
+    class Broken:
+        name = "keyfile"
+        def load(self, sid): return None
+        def store(self, sid, key): raise KeyUnavailableError("nowhere to put it", False)
+    with pytest.raises(K.KeyStoreError):
+        storage.open_database(data_dir_=dd, key_manager=KeyManager(cfg, backends=[lambda i: Broken()]))
+    assert not (dd / "screentime.sec").exists()
+
+
+def test_a_real_directory_fsync_error_is_not_swallowed_on_posix(dirs, monkeypatch):
+    dd, cfg = dirs
+    real_fsync = os.fsync
+
+    def flaky(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "Input/output error")
+        return real_fsync(fd)
+    monkeypatch.setattr(os, "fsync", flaky)
+    with pytest.raises(OSError) as e:
+        storage.open_database(data_dir_=dd, key_manager=file_km(cfg))
+    assert e.value.errno == errno.EIO
+
+
+def test_a_permission_error_opening_the_directory_is_not_swallowed_on_posix(dirs, monkeypatch):
+    """Skipping is by platform capability, never by exception type: where directory fsync IS supported, a
+    PermissionError from opening the directory is a real problem and must surface."""
+    dd, cfg = dirs
+    seen = spy_directories(monkeypatch, windows=True)            # real (Linux) platform: _dir_fsync_supported() is True
+    with pytest.raises(PermissionError):
+        storage.open_database(data_dir_=dd, key_manager=file_km(cfg))
+    assert seen.opened == [(dd, os.O_RDONLY)]
 
 
 def test_a_zero_byte_leftover_store_is_replaced_not_fatal(dirs):
