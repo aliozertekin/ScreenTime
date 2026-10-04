@@ -22,6 +22,7 @@ import bundle_check as bc               # noqa: E402
 import make_manifest as mm              # noqa: E402
 import make_zip as mz                   # noqa: E402
 import msys2_fetch as mf                # noqa: E402
+import smoke_store as ss                # noqa: E402
 
 needs_zstd = pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd not installed")
 
@@ -324,6 +325,80 @@ def test_windows_workflow_fails_loudly_when_the_installer_is_missing():
     assert "if-no-files-found: error" in wf                            # build job: no installer -> fail at upload
     assert "-Recurse" in wf and "ScreenTime-*-setup.exe" in wf        # smoke job: tolerate artifact nesting
     assert "-Mode Installer" in wf                                     # and the smoke test really runs the installer
+
+
+# ------------------------------------------------- the Windows smoke test's protected-store check
+@pytest.fixture
+def made_store(tmp_path):
+    """What the daemon leaves behind on first run: a protected store, plus a file-backed key (no OS keyring)."""
+    from screentime import storage
+    from screentime.keystore import KeyFileBackend, KeyManager
+    dd, cfg = tmp_path / "data", tmp_path / "cfg"
+    dd.mkdir()
+    km = KeyManager(cfg, backends=[lambda interactive: KeyFileBackend(cfg)])
+    storage.open_database(data_dir_=dd, key_manager=km, recover_orphans=False).close()
+    return dd, km
+
+
+def test_smoke_store_check_accepts_a_real_protected_store(made_store):
+    dd, km = made_store
+    lines = ss.check(dd, km)
+    assert any("ordinary SQLite file" in l for l in lines)             # the SQLite container IS the expected format
+    assert any("marker appears in no file" in l for l in lines) and any("wrong key is rejected" in l for l in lines)
+
+
+def test_smoke_store_main_reports_the_result_and_the_exit_code(made_store, monkeypatch, capsys):
+    dd, km = made_store
+    monkeypatch.setattr(ss.storage, "data_dir", lambda: dd)
+    monkeypatch.setattr(ss, "KeyManager", lambda: km)
+    assert ss.main() == 0
+    assert "STORE OK" in capsys.readouterr().out
+    (dd / "screentime.db").write_bytes(b"x")
+    assert ss.main() == 1
+    out = capsys.readouterr().out
+    assert "FAIL - " in out and "STORE OK" not in out
+
+
+def test_smoke_store_check_catches_a_store_that_does_not_encrypt(tmp_path, monkeypatch):
+    """A well-formed container whose records are NOT sealed (same shape, compressed plaintext inside) must fail. The app
+    compresses payloads before sealing, so the marker is not literally in the file: only the per-record check sees it."""
+    from screentime import storage
+    from screentime.keystore import KeyFileBackend, KeyManager
+    from screentime.secure_log import SecureLog
+    monkeypatch.setattr(SecureLog, "_seal", lambda self, pt, aad: (b"\0" * 12, bytes(pt) + b"\0" * 16))
+    monkeypatch.setattr(SecureLog, "_unseal", lambda self, nonce, ct, aad, what: bytes(ct)[:-16])
+    dd, cfg = tmp_path / "data", tmp_path / "cfg"
+    dd.mkdir()
+    km = KeyManager(cfg, backends=[lambda interactive: KeyFileBackend(cfg)])
+    storage.open_database(data_dir_=dd, key_manager=km, recover_orphans=False).close()
+    with pytest.raises(ss.SmokeFail, match="NOT encrypting"):
+        ss.check(dd, km)
+
+
+def test_smoke_store_check_catches_a_leftover_plaintext_database(made_store):
+    dd, km = made_store
+    (dd / "screentime.db-wal").write_bytes(b"")
+    with pytest.raises(ss.SmokeFail, match="plaintext legacy database"):
+        ss.check(dd, km)
+
+
+def test_smoke_store_check_catches_readable_usage_tables(made_store):
+    import sqlite3
+    dd, km = made_store
+    con = sqlite3.connect(dd / "screentime.sec")
+    con.execute("CREATE TABLE sessions(app TEXT, seconds INTEGER)")
+    con.commit()
+    con.close()
+    with pytest.raises(ss.SmokeFail, match="readable usage tables"):
+        ss.check(dd, km)
+
+
+def test_smoke_ps1_checks_the_store_contract_not_the_sqlite_header():
+    """screentime.sec is an ordinary SQLite container by design; asserting its header is absent was wrong (and failed
+    every Windows smoke run). The store is verified by smoke_store.py instead."""
+    ps1 = (PKG / "smoke.ps1").read_text()
+    assert 'match "SQLite"' not in ps1 and "ReadAllBytes" not in ps1
+    assert "smoke_store.py" in ps1 and "STORE OK" in ps1
 
 
 def test_packaging_inputs_are_consistent():
