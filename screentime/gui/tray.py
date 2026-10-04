@@ -18,6 +18,11 @@ log = logging.getLogger("screentime.tray")
 
 def try_create_indicator(on_show, on_quit):
     """Returns an indicator object (kept alive by the caller) or None."""
+    from .. import platform as _platform
+    if _platform.is_windows():
+        from gi.repository import GLib
+        from ..platform.windows.tray import try_create
+        return try_create(on_show, on_quit, lambda fn: GLib.idle_add(lambda: (fn(), False)[1]))
     for ns, ver in (("AyatanaAppIndicator3", "0.1"), ("AppIndicator3", "0.1")):
         try:
             import gi

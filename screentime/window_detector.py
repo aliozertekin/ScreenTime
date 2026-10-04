@@ -43,6 +43,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
+from . import platform as _platform
+
 log = logging.getLogger("screentime.window")
 
 
@@ -51,6 +53,9 @@ class RawFocus:
     identifier: str            # wm_class / app_id / exe name -- used for app_identity.resolve()
     pid: Optional[int] = None
     title: Optional[str] = None
+    # A friendlier name the detector already knows (Windows: the executable's
+    # FileDescription). Only used as the display name when nothing better resolves.
+    display_hint: Optional[str] = None
 
 
 class WindowDetector(ABC):
@@ -381,6 +386,8 @@ def create_window_detector() -> WindowDetector:
     """Pick the best available detector for the current session, preferring
     native/precise Wayland compositor protocols over X11/XWayland, since a
     Wayland session may still have DISPLAY set for XWayland compatibility."""
+    if _platform.is_windows():
+        return _create_windows_detector()
     session = detect_session_type()
     desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
 
@@ -413,4 +420,23 @@ def create_window_detector() -> WindowDetector:
         "(session=%s desktop=%s). Focused-app time cannot be measured until "
         "one is installed -- see README 'Wayland compatibility'.", session, desktop,
     )
+    return NullDetector()
+
+
+def _create_windows_detector() -> WindowDetector:
+    """Win32 foreground detector, with friendly names and Steam-game identity
+    wired in. Falls back to the honest NullDetector (and the daemon retries)
+    if Win32 is not usable yet."""
+    try:
+        from .platform.windows.window_detector import WindowsDetector
+        from .platform.windows.app_info import friendly_name_for_exe
+        from . import steam_library
+        det = WindowsDetector(name_for_exe=friendly_name_for_exe,
+                              steam_key_for_exe=lambda exe: steam_library.default_resolver().key_for_exe(exe))
+        if det.is_supported():
+            log.info("Using window detector: %s", det.name)
+            return det
+    except (OSError, RuntimeError, ImportError) as e:
+        log.debug("Windows detector unavailable: %s", e)
+    log.warning("The Win32 foreground-window API is not available yet; focused-app time cannot be measured.")
     return NullDetector()

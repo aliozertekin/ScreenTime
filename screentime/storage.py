@@ -7,7 +7,6 @@ copy of usage data.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -19,7 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from . import platform as _platform
 from .db import Database
+from .platform import filelock as _filelock
 from .keystore import (KeyManager, KeyNotFoundError, KeyStoreError, KeyUnavailableError, secure_delete_file)
 from .protected_store import ProtectedStore, table_digests
 from .secure_log import SecureLog, SecureStoreError, StoreFormatError, WrongKeyError  # noqa: F401 (re-exported)
@@ -46,11 +47,7 @@ class MigrationError(StorageError):
 
 # ----------------------------------------------------------------------- paths
 def data_dir() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    d = Path(base) / "screentime"
-    d.mkdir(parents=True, exist_ok=True)
-    os.chmod(d, 0o700)
-    return d
+    return _platform.paths().data_dir()
 
 
 def store_path(dd: Optional[Path] = None) -> Path:
@@ -62,8 +59,7 @@ def legacy_path(dd: Optional[Path] = None) -> Path:
 
 
 def _runtime_dir() -> Path:
-    r = os.environ.get("XDG_RUNTIME_DIR")
-    return Path(r) if r else Path(f"/tmp/screentime-{os.getuid()}")
+    return _platform.paths().runtime_dir()
 
 
 def status_file() -> Path:
@@ -114,14 +110,12 @@ def _exclusive(dd: Path, timeout: float = 60.0, should_stop=None):
     deadline = time.monotonic() + timeout
     try:
         while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if _filelock.try_lock(fd):
                 break
-            except OSError:
-                _stop_if_requested(should_stop)
-                if time.monotonic() > deadline:
-                    raise StorageError("another ScreenTime process is setting up the database")
-                time.sleep(0.1)
+            _stop_if_requested(should_stop)
+            if time.monotonic() > deadline:
+                raise StorageError("another ScreenTime process is setting up the database")
+            time.sleep(0.1)
         yield
     finally:
         os.close(fd)

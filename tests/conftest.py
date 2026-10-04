@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))      # shared test helpers (windows_fakes)
 
 
 @pytest.fixture(autouse=True)
@@ -15,6 +16,9 @@ def _isolated_xdg(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg-runtime"))
+    # Same guarantee on Windows: never touch a real %LOCALAPPDATA% / %APPDATA%.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "win-local"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "win-roaming"))
     (tmp_path / "xdg-runtime").mkdir()
     # Tests must never reach a real keyring (a developer's KWallet / GNOME Keyring):
     # point the session bus at nothing. That is exactly "no Secret Service here", so

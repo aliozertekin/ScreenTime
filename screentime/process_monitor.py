@@ -20,6 +20,7 @@ from typing import Optional
 
 import psutil
 
+from . import platform as _platform
 from .app_identity import resolve, ResolvedApp
 
 # Processes that are never meaningful "applications" to a human, regardless
@@ -33,6 +34,28 @@ _NOISE_EXE_NAMES = {
     "polkit-gnome-authentication-agent-1", "screentime-daemon", "screentime-gui",
     "bash", "zsh", "fish", "sh",
 }
+
+
+# Windows system/shell processes that are never meaningful "applications".
+# Names are executable stems (no ".exe"), lower-case.
+_WINDOWS_NOISE = {
+    "system", "registry", "smss", "csrss", "wininit", "winlogon", "services", "lsass", "svchost",
+    "fontdrvhost", "dwm", "sihost", "taskhostw", "ctfmon", "conhost", "dllhost", "runtimebroker",
+    "searchhost", "searchindexer", "startmenuexperiencehost", "shellexperiencehost", "textinputhost",
+    "applicationframehost", "securityhealthsystray", "explorer", "backgroundtaskhost", "audiodg",
+    "spoolsv", "wmiprvse", "lockapp", "logonui", "screentime", "screentime-daemon", "screentime-gui",
+    "cmd", "powershell", "pwsh", "wsl", "wslhost",
+}
+
+
+def process_identifier_from_name(name: str) -> str:
+    """Executable name -> the identifier used as the app key. On Windows that is
+    the lower-cased stem ('firefox.exe' -> 'firefox'), matching what the
+    foreground detector reports; elsewhere the name is used as-is."""
+    if _platform.is_windows():
+        stem, ext = os.path.splitext(name)
+        return (stem if ext.lower() in (".exe", ".scr", ".com") else name).lower()
+    return name
 
 
 @dataclass
@@ -57,21 +80,38 @@ def _process_app_identifier(p: psutil.Process) -> Optional[str]:
             return None
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return None
-    if not name or name in _NOISE_EXE_NAMES:
+    if not name:
+        return None
+    if _platform.is_windows():
+        ident = process_identifier_from_name(name)
+        return None if ident in _WINDOWS_NOISE else ident
+    if name in _NOISE_EXE_NAMES:
         return None
     return name
+
+
+def _current_windows_user() -> Optional[str]:
+    """DOMAIN\\user as psutil reports it, lower-cased."""
+    domain, user = os.environ.get("USERDOMAIN"), os.environ.get("USERNAME")
+    return f"{domain}\\{user}".lower() if domain and user else None
 
 
 def list_running_apps(uid: Optional[int] = None) -> dict[str, RunningApp]:
     """Returns canonical-key -> RunningApp for the current user's processes,
     with all PIDs belonging to the same app grouped together (e.g. a browser's
     many renderer/GPU child processes all collapse into one entry)."""
-    uid = uid if uid is not None else os.getuid()
+    windows = _platform.is_windows()
+    uid = uid if uid is not None else (None if windows else os.getuid())
+    me = _current_windows_user() if windows else None
     grouped: dict[str, RunningApp] = {}
-    for p in psutil.process_iter(attrs=["pid", "name", "uids"]):
+    for p in psutil.process_iter(attrs=["pid", "name", "uids"] + (["username"] if windows else [])):
         try:
             info = p.info
-            if info.get("uids") and info["uids"].real != uid:
+            if windows:
+                # Only this user's processes; others (SYSTEM, services) are not "apps".
+                if not info.get("username") or (me and info["username"].lower() != me):
+                    continue
+            elif info.get("uids") and info["uids"].real != uid:
                 continue
             ident = _process_app_identifier(p)
             if not ident:

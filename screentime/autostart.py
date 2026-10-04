@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import instance_lock
+from . import platform as _platform
 
 UNIT_NAME = "screentime-daemon.service"
 PACKAGED_EXE = "/usr/bin/screentime-daemon"
@@ -424,3 +425,19 @@ def get_status(db=None) -> DaemonStatus:
         window_backend=window_backend,
         idle_backend=idle_backend,
     )
+
+
+# ------------------------------------------------------------------ Windows
+# Windows has no systemd and no XDG autostart: the same contract (enable,
+# disable, is_enabled, daemon_is_running, start_now, stop_now, restart_now,
+# reconcile, get_status) is implemented with a per-user Task Scheduler logon task
+# in platform/windows/autostart.py. Selected here, once, by the central switch;
+# the Linux implementation above is untouched. daemon_is_outdated /
+# refresh_if_outdated are shared and pick up the Windows daemon_is_running /
+# restart_now through this module's globals.
+if _platform.is_windows():
+    from .platform.windows.autostart import (  # noqa: F811
+        DaemonStatus, _find_daemon_processes, _is_daemon_cmdline, daemon_is_running, disable, enable,
+        get_status, is_enabled, reconcile, restart_now, start_now, stop_now,
+    )
+    from .platform.windows.autostart import daemon_command  # noqa: F811  (argv list, like the Linux one)

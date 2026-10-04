@@ -42,6 +42,7 @@ from . import __version__
 from .process_monitor import resolve_pid_to_app
 from . import wayland_setup
 from .instance_lock import InstanceLock
+from . import platform as _platform
 
 # While a backend is the honest "nothing available" one, re-run detection this
 # often. At login the session environment / compositor helper may simply not be
@@ -83,8 +84,11 @@ class Daemon:
     def __init__(self, db: Database):
         self.db = db
         self.config = Config(db)
-        self.session_manager = SessionManager(db)
-        install_result = wayland_setup.auto_install_if_needed(db)
+        # The monotonic clock must stop while the machine sleeps (Linux's does;
+        # Windows needs QueryUnbiasedInterruptTime -- see platform/windows/clock.py).
+        mono = _platform.monotonic_clock()
+        self.session_manager = SessionManager(db, mono_clock=mono)
+        install_result = None if _platform.is_windows() else wayland_setup.auto_install_if_needed(db)
         if install_result is not None:
             ok, msg = install_result
             (log.info if ok else log.warning)("Wayland focus helper: %s", msg)
@@ -114,7 +118,10 @@ class Daemon:
         self._suspend_mono = 0.0
         self._inhibitor_fd = None
         self._wall = time.time            # injectable for tests
-        self._mono = time.monotonic
+        self._mono = mono
+        self._power = None                # PowerEventSource (Windows); Linux keeps its logind code inline
+        self._last_tick_clocks = None
+        self._drift_guard = _platform.is_windows()
         self._loop = GLib.MainLoop()
         self._sleep_sub_id = None
         self._system_bus = None
@@ -129,7 +136,7 @@ class Daemon:
             if resolved is None:
                 return None
         else:
-            resolved = app_identity.resolve(raw.identifier, pid=raw.pid)
+            resolved = app_identity.resolve(raw.identifier, fallback_display=raw.display_hint, pid=raw.pid)
             resolved = self._keep_known_steam_name(resolved)
         return FocusInfo(
             key=resolved.key, display_name=resolved.display_name,
@@ -202,6 +209,8 @@ class Daemon:
     def _tick(self) -> bool:
         self._maybe_redetect()
         self._maybe_maintain()
+        if self._drift_guard and not self._suspended:
+            self._detect_missed_suspend()
         if self._suspended:
             # Between logind's "going to sleep" and the actual freeze (and until
             # the resume signal) nothing may open a new session: it would then
@@ -265,6 +274,7 @@ class Daemon:
         log.info("System resumed")
         self._suspended = False
         self._was_idle = False
+        self._last_tick_clocks = None     # drift-guard baseline predates the sleep; restart it
         try:
             raw = self.window_detector.get_focused()
             self.session_manager.on_resume(self._raw_to_focus(raw))
@@ -272,6 +282,22 @@ class Daemon:
         except Exception:
             log.exception("Error resuming tracking")
         self._take_sleep_inhibitor()
+
+    def _detect_missed_suspend(self):
+        """Windows only. If the wall clock advanced much more than the
+        sleep-excluding monotonic clock since the last tick, the machine slept
+        and no power event reached us (Modern Standby, or an event delivered
+        late). Close the session at its true pre-sleep end (derived from the
+        monotonic clock, so it excludes the sleep) and restart tracking."""
+        wall, mono = self._wall(), self._mono()
+        last, self._last_tick_clocks = self._last_tick_clocks, (wall, mono)
+        if last is None:
+            return
+        if (wall - last[0]) - (mono - last[1]) > SUSPEND_DRIFT_SECONDS:
+            log.warning("Wall clock ran %.0fs ahead of the monotonic clock: treating it as a missed suspend",
+                        (wall - last[0]) - (mono - last[1]))
+            self._suspend_tracking()
+            self._resume_tracking()
 
     def _suspend_guard_expired(self) -> bool:
         """True if we've been "suspended" implausibly long without a resume
@@ -307,7 +333,21 @@ class Daemon:
             except OSError:
                 pass
 
+    def _setup_windows_power(self):
+        from .platform.windows.power_events import WindowsPowerEventSource, make_dispatcher
+        self._power = WindowsPowerEventSource(make_dispatcher(GLib.idle_add))
+        ok = self._power.start(self._suspend_tracking, self._resume_tracking,
+                               lambda: self._shutdown("shutdown"))
+        self.db.set_setting("active_power_backend", self._power.name if ok else "none")
+        if ok:
+            log.info("Subscribed to Windows power notifications for suspend/resume handling")
+        else:
+            log.warning("Windows power notifications unavailable; relying on the sleep-excluding clock "
+                        "and the clock-drift guard")
+
     def _setup_sleep_watcher(self):
+        if _platform.is_windows():
+            return self._setup_windows_power()
         try:
             self._system_bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
             self._sleep_sub_id = self._system_bus.signal_subscribe(
@@ -316,8 +356,10 @@ class Daemon:
                 self._on_prepare_for_sleep,
             )
             self._take_sleep_inhibitor()
+            self.db.set_setting("active_power_backend", "logind")
             log.info("Subscribed to logind PrepareForSleep for suspend/resume handling")
         except Exception as e:
+            self.db.set_setting("active_power_backend", "none")
             log.warning("Could not subscribe to logind sleep signal (%s); suspend/resume will be "
                         "handled by clock-jump immunity + idle detection instead", e)
 
@@ -327,6 +369,10 @@ class Daemon:
         self.session_manager.shutdown(reason)
         self.db.set_setting("active_window_backend", "")
         self.db.set_setting("active_idle_backend", "")
+        self.db.set_setting("active_power_backend", "")
+        if self._power is not None:
+            self._power.stop()
+            self._power = None
         self._release_sleep_inhibitor()
         if self._system_bus and self._sleep_sub_id:
             self._system_bus.signal_unsubscribe(self._sleep_sub_id)
@@ -351,8 +397,19 @@ class Daemon:
         interval_ms = max(500, int(self.config.poll_interval_seconds * 1000))
         GLib.timeout_add(interval_ms, self._tick)
 
-        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: self._shutdown("shutdown"))
-        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda: self._shutdown("shutdown"))
+        if _platform.is_windows():
+            # GLib.unix_signal_add does not exist on Windows. Poll the stop flag
+            # (Ctrl+C / SIGTERM handler, or the graceful-stop event that
+            # autostart.stop_now() sets); the poll also lets Python run its signal handlers.
+            def _poll_stop():
+                if should_stop is not None and should_stop():
+                    self._shutdown("shutdown")
+                    return False
+                return True
+            GLib.timeout_add(250, _poll_stop)
+        else:
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: self._shutdown("shutdown"))
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda: self._shutdown("shutdown"))
         if should_stop is not None and should_stop():
             # A stop request that arrived before the loop's own handlers existed.
             GLib.idle_add(lambda: (self._shutdown("shutdown"), False)[1])
@@ -366,10 +423,14 @@ def main():
     parser = argparse.ArgumentParser(description="ScreenTime tracking daemon")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    if _platform.is_windows():
+        from .platform.windows.logging_setup import configure as _configure_logging
+        _configure_logging(args.verbose)
+    else:
+        logging.basicConfig(
+            level=logging.DEBUG if args.verbose else logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
     # Idempotent startup: whichever mechanism launched us (systemd unit, XDG
     # autostart, the Settings button, a shell), only one daemon may track.
     #
@@ -389,9 +450,11 @@ def main():
         stop["requested"] = True
     signal.signal(signal.SIGTERM, _early_stop)
     signal.signal(signal.SIGINT, _early_stop)
-    stopping = lambda: stop["requested"]
-
     lock = InstanceLock()
+    # On Windows a stop can also arrive as the named stop event (graceful stop
+    # from Settings / the uninstaller); the lock object owns that event.
+    stopping = lambda: stop["requested"] or bool(getattr(lock, "stop_requested", lambda: False)())
+
     if not lock.acquire():
         log.info("Another screentime-daemon is already running; exiting (this is not an error)")
         return 0

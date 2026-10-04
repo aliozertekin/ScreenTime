@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from . import platform as _platform
+
 log = logging.getLogger("screentime.steam")
 
 STEAM_APP_KEY_RE = re.compile(r"^steam_app_(\d+)$")
@@ -108,7 +110,43 @@ def parse_vdf(text: str) -> dict:
 
 
 # ------------------------------------------------------------- discovery
+def _registry_steam_paths() -> list[str]:
+    """Steam's own record of where it is installed (HKCU/HKLM). Windows only."""
+    out: list[str] = []
+    try:
+        import winreg
+    except ImportError:
+        return out
+    for hive, sub, value in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+    ):
+        try:
+            with winreg.OpenKey(hive, sub) as k:
+                v, _ = winreg.QueryValueEx(k, value)
+                if isinstance(v, str) and v:
+                    out.append(v)
+        except OSError:
+            continue
+    return out
+
+
+def windows_roots(env: Optional[dict] = None, registry: Optional[Callable[[], list]] = None) -> list[Path]:
+    """Common native Windows Steam install locations (registry first, then the
+    default Program Files folders). `env`/`registry` are injectable for tests."""
+    env = os.environ if env is None else env
+    paths: list[str] = list((registry or _registry_steam_paths)())
+    for var in ("ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"):
+        base = env.get(var)
+        if base:
+            paths.append(str(Path(base) / "Steam"))
+    return [Path(p) for p in paths]
+
+
 def _default_roots(home: Path) -> list[Path]:
+    if _platform.is_windows():
+        return windows_roots()
     return [
         home / ".local" / "share" / "Steam",
         home / ".steam" / "steam",
@@ -192,6 +230,7 @@ class SteamResolver:
         self._sig: Optional[tuple] = None
         self._last_check = float("-inf")
         self._pid_cache: dict[tuple[int, int], Optional[int]] = {}
+        self._installdirs: Optional[dict[str, int]] = None     # lower-case installdir -> AppID (Windows exe lookup)
 
     # ---- roots / libraries ------------------------------------------------
     def roots(self) -> list[Path]:
@@ -256,12 +295,14 @@ class SteamResolver:
             self._sig = sig
             self._names.clear()
             self._pid_cache.clear()
+            self._installdirs = None
         else:
             self._libraries = stale_libs if stale_libs is not None else self._libraries
 
     def invalidate(self):
         self._names.clear()
         self._pid_cache.clear()
+        self._installdirs = None
         self._libraries = None
         self._sig = None
         self._last_check = float("-inf")
@@ -324,6 +365,59 @@ class SteamResolver:
         appid = appid_from_key(key)
         return self.name_for_appid(appid) if appid else None
 
+    # ---- Windows: games identified by where their executable lives ----------
+    def _installdir_index(self) -> dict[str, int]:
+        """installdir (the folder name under steamapps/common) -> AppID, from
+        every appmanifest in every library. Dropped with the name cache when
+        Steam's files change."""
+        if self._installdirs is not None:
+            return self._installdirs
+        index: dict[str, int] = {}
+        for lib in self.libraries():
+            sa = _steamapps_dir(lib)
+            if sa is None:
+                continue
+            for mf in sa.glob("appmanifest_*.acf"):
+                aid = _valid_appid(mf.stem.split("_", 1)[1])
+                if aid is None:
+                    continue
+                try:
+                    state = parse_vdf(mf.read_text(errors="replace")).get("appstate", {})
+                except OSError:
+                    continue
+                installdir = (state.get("installdir") or "").strip().lower() if isinstance(state, dict) else ""
+                if installdir:
+                    index.setdefault(installdir, aid)
+        self._installdirs = index
+        return index
+
+    def appid_for_exe(self, exe_path: Optional[str]) -> Optional[int]:
+        """AppID of an installed game whose executable lives under
+        <library>/steamapps/common/<installdir>/ (offline, no process access
+        needed, works for protected processes too)."""
+        if not exe_path:
+            return None
+        self._maybe_invalidate()
+        target = os.path.normcase(os.path.normpath(exe_path))
+        try:
+            for lib in self.libraries():
+                sa = _steamapps_dir(lib)
+                if sa is None:
+                    continue
+                common = os.path.normcase(os.path.normpath(str(sa / "common")))
+                if target.startswith(common + os.sep):
+                    first = target[len(common) + 1:].split(os.sep, 1)[0]
+                    return self._installdir_index().get(first.lower())
+        except Exception:
+            log.debug("Steam exe lookup for %s failed", exe_path, exc_info=True)
+        return None
+
+    def key_for_exe(self, exe_path: Optional[str]) -> Optional[str]:
+        """The canonical `steam_app_<AppID>` key for a game executable, so a
+        Windows game groups under the same key a Proton game does on Linux."""
+        appid = self.appid_for_exe(exe_path)
+        return f"steam_app_{appid}" if appid else None
+
     # ---- process information ---------------------------------------------
     def appid_for_pid(self, pid: Optional[int]) -> Optional[int]:
         """AppID of a game Steam launched, read from that process's own
@@ -333,6 +427,8 @@ class SteamResolver:
         ever need. Cached per (pid, start time) so pid reuse can't mislead."""
         if not pid or pid <= 0:
             return None
+        if _platform.is_windows():
+            return self._appid_for_pid_psutil(pid)
         try:
             start = os.stat(f"{self._proc_root}/{pid}").st_ctime_ns
         except OSError:
@@ -354,6 +450,29 @@ class SteamResolver:
                         break
         except OSError:
             appid = None
+        if len(self._pid_cache) >= _PID_CACHE_MAX:
+            self._pid_cache.clear()
+        self._pid_cache[ck] = appid
+        return appid
+
+    def _appid_for_pid_psutil(self, pid: int) -> Optional[int]:
+        """Windows: Steam sets SteamAppId/SteamGameId in a game's environment.
+        psutil can read it for the user's own processes; protected ones just
+        raise AccessDenied, which is "unknown", not an error."""
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            ck = (pid, int(proc.create_time() * 1000))
+            if ck in self._pid_cache:
+                return self._pid_cache[ck]
+            env = {k.lower(): v for k, v in proc.environ().items()}
+        except Exception:                # noqa: BLE001 - NoSuchProcess/AccessDenied/OSError: all mean "unknown"
+            return None
+        appid = None
+        for var in _APPID_ENV_VARS:
+            appid = _valid_appid(env.get(var.lower()))
+            if appid:
+                break
         if len(self._pid_cache) >= _PID_CACHE_MAX:
             self._pid_cache.clear()
         self._pid_cache[ck] = appid

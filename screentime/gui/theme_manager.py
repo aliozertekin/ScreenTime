@@ -21,6 +21,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .. import theme as theme_mod
 from ..config import Config
+from .. import platform as _platform
 
 log = logging.getLogger("screentime.theme")
 
@@ -118,6 +119,11 @@ class ThemeManager:
         return (Gtk.get_major_version(), Gtk.get_minor_version()) >= (4, 16)
 
     def _system_accent(self) -> Optional[str]:
+        if _platform.is_windows():
+            from ..platform.windows.theme import system_accent
+            win = system_accent()
+            if win:
+                return win               # libadwaita has no Windows accent source; the registry does
         sm = self.style_manager
         try:
             if sm.get_system_supports_accent_colors():           # libadwaita >= 1.6
@@ -135,6 +141,11 @@ class ThemeManager:
             # preference; once we force a scheme it would just echo our choice.
             self.style_manager.set_color_scheme(Adw.ColorScheme.DEFAULT)
             info.is_dark = self.style_manager.get_dark()
+            if _platform.is_windows():
+                from ..platform.windows.theme import system_is_dark
+                win_dark = system_is_dark()
+                if win_dark is not None:
+                    info.is_dark = win_dark      # libadwaita can't read Windows' app-mode setting
         return info
 
     def apply(self) -> theme_mod.Palette:
@@ -150,7 +161,7 @@ class ThemeManager:
 
             # Keep libadwaita's own (non-overridden) drawing -- shadows, focus
             # rings, symbolic icon tinting -- on the same side as our palette.
-            if theme.fixed_scheme or palette.source == "kde" or scheme != "system":
+            if theme.fixed_scheme or palette.source == "kde" or scheme != "system" or _platform.is_windows():
                 target = Adw.ColorScheme.FORCE_DARK if palette.is_dark else Adw.ColorScheme.FORCE_LIGHT
             else:
                 target = Adw.ColorScheme.DEFAULT
@@ -186,6 +197,9 @@ class ThemeManager:
                 self._signal_ids.append(sm.connect(prop, self._on_system_changed))
             except (TypeError, ValueError):
                 pass                                              # property absent on this libadwaita
+        if _platform.is_windows():
+            self._start_windows_polling()
+            return
         paths = self._kde_paths if self._kde_paths is not None else theme_mod.kde_config_paths()
         for path in paths:
             try:
@@ -194,6 +208,23 @@ class ThemeManager:
                 self._monitors.append(mon)
             except GLib.Error as e:
                 log.debug("cannot monitor %s: %s", path, e)
+
+    def _windows_snapshot(self):
+        from ..platform.windows.theme import system_accent, system_is_dark
+        return (system_is_dark(), system_accent())
+
+    def _start_windows_polling(self):
+        """Windows exposes no change signal to GTK; the two registry values are
+        cheap to read, so check them every few seconds."""
+        self._win_snapshot = self._windows_snapshot()
+
+        def poll():
+            snap = self._windows_snapshot()
+            if snap != self._win_snapshot:
+                self._win_snapshot = snap
+                self._on_system_changed()
+            return True
+        self._win_poll_id = GLib.timeout_add_seconds(5, poll)
 
     def _on_system_changed(self, *_args):
         if self._applying:
@@ -211,6 +242,9 @@ class ThemeManager:
         return False
 
     def close(self):
+        if getattr(self, "_win_poll_id", 0):
+            GLib.source_remove(self._win_poll_id)
+            self._win_poll_id = 0
         if self._debounce_id:
             GLib.source_remove(self._debounce_id)
             self._debounce_id = 0

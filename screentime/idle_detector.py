@@ -27,6 +27,8 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 
+from . import platform as _platform
+
 log = logging.getLogger("screentime.idle")
 
 
@@ -129,6 +131,17 @@ class LogindIdleDetector(IdleDetector):
 
 
 def create_idle_detector() -> IdleDetector:
+    if _platform.is_windows():
+        try:
+            from .platform.windows.idle_detector import WindowsIdleDetector
+            det = WindowsIdleDetector()
+            if det.is_supported():
+                log.info("Using idle detector: %s", det.name)
+                return det
+        except (OSError, RuntimeError, ImportError) as e:
+            log.debug("Windows idle detector unavailable: %s", e)
+        log.warning("GetLastInputInfo is not available; idle timeout will not take effect.")
+        return NullIdleDetector()
     session = os.environ.get("XDG_SESSION_TYPE", "")
     candidates: list[IdleDetector] = []
     if session != "wayland":

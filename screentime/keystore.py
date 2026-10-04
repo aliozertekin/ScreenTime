@@ -93,7 +93,8 @@ def decode_recovery_key(text: str) -> bytes:
 
 
 def default_config_dir() -> Path:
-    return Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "screentime"
+    from . import platform as _platform
+    return _platform.paths().config_dir()
 
 
 def secure_delete_file(path: Path) -> bool:
@@ -324,10 +325,20 @@ class KeyManager:
 
     def __init__(self, config_dir: Optional[Path] = None, backends: Optional[list] = None):
         self.config_dir = Path(config_dir) if config_dir else default_config_dir()
-        self._factories = backends or [
-            lambda interactive: SecretServiceBackend(interactive=interactive),
-            lambda interactive: KeyFileBackend(self.config_dir),
-        ]
+        from . import platform as _platform
+        if backends:
+            self._factories = backends
+        elif _platform.is_windows():
+            from .platform.windows.keystore import backend_factories
+            self._factories = backend_factories(self.config_dir)
+        else:
+            self._factories = [
+                lambda interactive: SecretServiceBackend(interactive=interactive),
+                lambda interactive: KeyFileBackend(self.config_dir),
+            ]
+        # The backend that counts as "the system keyring" for move_to_keyring().
+        self.keyring_backend_name = "credential-manager" if (not backends and _platform.is_windows()) \
+            else "secret-service"
 
     # ---- persisted, non-secret settings (which backend; which key)
     @property
@@ -409,13 +420,16 @@ class KeyManager:
         """Interactive: copy the key file's key into the keyring, verify, then
         destroy the file. Nothing is deleted unless the keyring returns the key."""
         key = self.get_key(store_id, interactive=True)
-        ss = next(b for b in (f(True) for f in self._factories) if b.name == "secret-service")
+        ss = next(b for b in (f(True) for f in self._factories) if b.name == self.keyring_backend_name)
         ss.store(store_id, key)
         if ss.load(store_id) != key:
             raise KeyStoreError("the keyring did not return the key; the key file was kept")
-        self._write_settings(backend="secret-service", key_id=key_fingerprint(key), store_id=store_id.hex())
-        KeyFileBackend(self.config_dir).delete(store_id)
-        return "secret-service"
+        self._write_settings(backend=self.keyring_backend_name, key_id=key_fingerprint(key), store_id=store_id.hex())
+        for f in self._factories:                       # destroy the weaker copy (key file / DPAPI file)
+            fallback = f(False)
+            if fallback.name in ("keyfile", "dpapi-file"):
+                fallback.delete(store_id)
+        return self.keyring_backend_name
 
     def current_backend(self) -> Optional[str]:
         return self.read_settings().get("backend")

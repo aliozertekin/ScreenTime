@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from . import platform as _platform
 from . import steam_library
 
 
@@ -45,6 +46,8 @@ def _canonicalize(raw: str) -> str:
 def _desktop_file_index() -> dict:
     """Maps canonical keys (from StartupWMClass, Exec basename, and the
     .desktop filename itself) -> parsed (name, icon, path)."""
+    if _platform.is_windows():
+        return {}                   # no .desktop files; Windows names come from the exe's version info
     search_dirs = [
         "/usr/share/applications",
         "/usr/local/share/applications",

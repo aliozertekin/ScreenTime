@@ -12,15 +12,16 @@ never leave a stale lock that blocks the next start.
 """
 from __future__ import annotations
 
-import fcntl
 import os
 from pathlib import Path
 from typing import Optional
 
+from . import platform as _platform
+from .platform import filelock as _filelock
+
 
 def lock_path() -> Path:
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    base = Path(runtime) if runtime else Path(f"/tmp/screentime-{os.getuid()}")
+    base = _platform.paths().lock_dir()
     base.mkdir(parents=True, exist_ok=True)
     return base / "screentime-daemon.lock"
 
@@ -32,9 +33,7 @@ class InstanceLock:
 
     def acquire(self) -> bool:
         fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not _filelock.try_lock(fd):
             os.close(fd)
             return False
         os.ftruncate(fd, 0)
@@ -45,7 +44,7 @@ class InstanceLock:
     def release(self):
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                _filelock.unlock(self._fd)
             finally:
                 os.close(self._fd)
                 self._fd = None
@@ -61,11 +60,16 @@ def is_held(path: Optional[Path] = None) -> bool:
     except OSError:
         return False
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not _filelock.try_lock(fd):
             return True
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _filelock.unlock(fd)
         return False
     finally:
         os.close(fd)
+
+
+# Windows uses a per-user named mutex instead of a lock file (see
+# platform/windows/instance_lock.py). Selected once, here, by the central
+# platform switch; the Linux implementation above is untouched.
+if _platform.is_windows():
+    from .platform.windows.instance_lock import InstanceLock, is_held, lock_path  # noqa: F811

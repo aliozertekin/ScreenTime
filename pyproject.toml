@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "screentime"
 version = "1.3.0"
-description = "A native, fully local application usage tracker for Arch Linux"
+description = "A native, fully local application usage tracker for Linux and Windows"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -24,6 +24,7 @@ dev = ["pytest>=7.0"]
 screentime-daemon = "screentime.daemon:main"
 screentime-gui = "screentime.gui.app:main"
 screentime-security = "screentime.security_cli:main"
+screentime-diagnose = "screentime.diagnostics:main"
 
 [tool.setuptools.packages.find]
 include = ["screentime*"]
@@ -32,4 +33,7 @@ include = ["screentime*"]
 screentime = ["migrations/*.sql", "resources/**/*"]
 
 [tool.pytest.ini_options]
-markers = ["real_process_scan: test exercises the machine-wide process scan (psutil patched by the test itself)"]
+markers = [
+    "real_process_scan: test exercises the machine-wide process scan (psutil patched by the test itself)",
+    "windows_live: needs a real Windows desktop session (run with SCREENTIME_LIVE=1)",
+]

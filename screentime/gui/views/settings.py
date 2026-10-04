@@ -11,6 +11,7 @@ from ...config import Config
 from ... import autostart
 from ... import wayland_setup
 from ... import theme as theme_mod
+from ... import platform as _platform
 from ... import storage
 from ...keystore import KeyManager, KeyStoreError
 from ...secure_log import SecureStoreError
@@ -96,8 +97,10 @@ class SettingsView(Gtk.Box):
         diag_group.add(self._sleep_row)
         self._window_backend_row = Adw.ActionRow(title="Active-window detection")
         self._idle_backend_row = Adw.ActionRow(title="Idle detection")
+        self._power_backend_row = Adw.ActionRow(title="Sleep / wake detection")
         diag_group.add(self._window_backend_row)
         diag_group.add(self._idle_backend_row)
+        diag_group.add(self._power_backend_row)
         self._refresh_backend_rows()
         self._refresh_startup_rows()
 
@@ -201,12 +204,21 @@ class SettingsView(Gtk.Box):
         st = storage.security_status()
         self._sec_protect_row.set_subtitle(
             f"Encrypted with AES-256-GCM ({st.store_bytes / 1024:.0f} KiB on disk)")
-        keyring = st.backend == "secret-service"
-        self._sec_key_row.set_subtitle(
-            "System keyring (Secret Service / KWallet)" if keyring else
-            "Key file \u2014 weaker: anyone who can read your home directory can read the data. "
-            "Move the key into the keyring for stronger protection.")
-        self._sec_move_btn.set_visible(st.backend == "keyfile")
+        keyring = st.backend in ("secret-service", "credential-manager")
+        if st.backend == "credential-manager":
+            key_text = ("Windows Credential Manager \u2014 tied to your Windows account: programs running as you "
+                        "could request it, so keep your recovery key safe.")
+        elif st.backend == "dpapi-file":
+            key_text = ("DPAPI-protected key file \u2014 tied to your Windows account, but weaker than Credential "
+                        "Manager. Move the key into Credential Manager for stronger protection.")
+        elif keyring:
+            key_text = "System keyring (Secret Service / KWallet)"
+        else:
+            key_text = ("Key file \u2014 weaker: anyone who can read your home directory can read the data. "
+                        "Move the key into the keyring for stronger protection.")
+        self._sec_key_row.set_subtitle(key_text)
+        self._sec_move_btn.set_label("Move to Credential Manager" if _platform.is_windows() else "Move to keyring")
+        self._sec_move_btn.set_visible(st.backend in ("keyfile", "dpapi-file"))
         waiting = st.state in ("waiting", "key-missing", "wrong-key")
         self._sec_state_row.set_visible(waiting)
         if waiting:
@@ -425,8 +437,10 @@ class SettingsView(Gtk.Box):
         st = autostart.get_status(self.db)
         self._installed_row.set_subtitle("Yes" if st.installed else "No \u2014 screentime-daemon was not found")
         if st.enabled:
-            how = {"systemd": "systemd user service", "xdg-autostart": "XDG autostart entry"}[st.mechanism]
-            self._enabled_row.set_subtitle(f"Yes ({how})")
+            how = {"systemd": "systemd user service", "xdg-autostart": "XDG autostart entry",
+                   "task-scheduler": "Windows Task Scheduler"}.get(st.mechanism, st.mechanism)
+            stale = getattr(st, "task_state", "") == "stale"
+            self._enabled_row.set_subtitle(f"Yes ({how})" + ("; will be repaired next time ScreenTime opens" if stale else ""))
         else:
             self._enabled_row.set_subtitle("No \u2014 tracking will not resume after you log in again")
         from ... import __version__
@@ -465,6 +479,8 @@ class SettingsView(Gtk.Box):
         idle_backend = self.db.get_setting("active_idle_backend") or ""
         self._window_backend_row.set_subtitle(window_backend or "Unknown \u2014 start the daemon to detect")
         self._idle_backend_row.set_subtitle(idle_backend or "Unknown \u2014 start the daemon to detect")
+        power_backend = self.db.get_setting("active_power_backend") or ""
+        self._power_backend_row.set_subtitle(power_backend or "Unknown \u2014 start the daemon to detect")
 
     def _on_rebuild(self, _btn):
         self.db.rebuild_daily_totals()
@@ -491,9 +507,9 @@ class SettingsView(Gtk.Box):
         self._daemon_btn.set_sensitive(True)
         if not ok:
             action = "stop" if was_running else "start"
-            self._daemon_row.set_subtitle(
-                f"Couldn't {action} it automatically. Try: systemctl --user {action} screentime-daemon"
-            )
+            hint = ("Try: Start menu \u2192 ScreenTime, or run screentime-daemon" if _platform.is_windows()
+                    else f"Try: systemctl --user {action} screentime-daemon")
+            self._daemon_row.set_subtitle(f"Couldn't {action} it automatically. {hint}")
         self._refresh_backend_rows()
         return False  # one-shot GLib.idle_add callback
 

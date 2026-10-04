@@ -28,10 +28,8 @@ SCHEMA_PATH = Path(__file__).resolve().parent / "migrations" / "001_init.sql"
 
 
 def default_db_path() -> Path:
-    xdg_data = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    d = Path(xdg_data) / "screentime"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "screentime.db"
+    from . import platform as _platform
+    return _platform.paths().data_dir() / "screentime.db"
 
 
 def local_day(ts: float) -> str:

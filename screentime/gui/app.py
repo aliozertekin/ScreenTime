@@ -14,6 +14,7 @@ from .theme_manager import ThemeManager, set_theme_manager
 from .tray import try_create_indicator
 from .. import wayland_setup
 from .. import autostart
+from .. import platform as _platform
 from .. import __version__
 
 log = logging.getLogger("screentime.gui")
@@ -27,7 +28,8 @@ class ScreenTimeApp(Adw.Application):
         # unlock / create dialog.
         self.db = storage.open_database(recover_orphans=False, interactive=True)
         self.config = Config(self.db)
-        wayland_setup.auto_install_if_needed(self.db)
+        if not _platform.is_windows():
+            wayland_setup.auto_install_if_needed(self.db)
         self.window: MainWindow | None = None
         self.theme: ThemeManager | None = None
         self._indicator = None
@@ -86,6 +88,8 @@ class ScreenTimeApp(Adw.Application):
             self.window.present()
 
     def _quit(self):
+        if self._indicator is not None and hasattr(self._indicator, "stop"):
+            self._indicator.stop()                    # Windows tray: remove the icon from the notification area
         if self.theme is not None:
             self.theme.close()
         self.db.close()

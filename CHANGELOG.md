@@ -4,6 +4,21 @@ Versions follow semantic versioning. The version lives in `pyproject.toml`,
 `PKGBUILD` (`pkgver`) and `screentime/__init__.py` (`__version__`);
 `tests/test_version.py` fails if they disagree.
 
+## Unreleased — Windows support
+
+* **Windows 10/11 (64-bit)** as a first-class platform, same app and same encrypted store.
+  New `screentime/platform/` layer with one central platform switch; Linux behaviour unchanged.
+* Native Win32 foreground detection (executable identity, never window titles), `GetLastInputInfo`
+  idle detection, `WM_POWERBROADCAST` suspend/resume with a sleep-excluding clock and a drift guard.
+* Per-user named-mutex single instance, Task Scheduler start-at-login (self-healing, never re-enables
+  a startup the user turned off), Credential Manager key storage with a DPAPI fallback, Windows tray
+  icon, Windows light/dark + accent for the existing theme system.
+* Offline Steam: native Windows libraries, `steam_app_<AppID>` keys for games found by install folder.
+* `screentime-diagnose` cross-platform diagnostics (no secrets, no titles).
+* Packaging: MSYS2-based relocatable bundle, per-user Inno Setup installer, portable zip, CI workflow.
+* Fixed: exe-path Steam lookup is case-insensitive on every OS; the README theme table the test suite
+  requires was missing.
+
 ## 1.3.0 — Encrypted local database; 12 more themes
 
 **Data protection** (details and limits in the README)

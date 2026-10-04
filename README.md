@@ -1,6 +1,6 @@
 # ScreenTime
 
-**A private, local screen-time tracker for Linux.**
+**A private, local screen-time tracker for Linux and Windows.**
 
 ScreenTime shows how much time you actually spend using your desktop applications.
 
@@ -17,7 +17,7 @@ It tracks the application you have **focused and in use**, rather than simply co
 * Exclude applications from tracking
 * Exclude suspended/sleep time
 * Continue tracking when the dashboard is closed
-* Support X11 and major Wayland environments
+* Support X11 and major Wayland environments on Linux, and Windows 10/11
 * Store all tracking data locally
 * Built-in diagnostics for troubleshooting
 
@@ -35,17 +35,33 @@ There is:
 * No update checker
 * No crash-reporting service
 
-Your tracking database is stored at:
+Your tracking database is encrypted at rest (AES-256-GCM) and stored at:
 
-```text
-~/.local/share/screentime/screentime.db
-```
+| OS | Location |
+| --- | --- |
+| Linux | `~/.local/share/screentime/screentime.sec` |
+| Windows | `%LOCALAPPDATA%\ScreenTime\screentime.sec` |
+
+The encryption key is kept in your system keyring on Linux (Secret Service / KWallet) and in **Windows Credential Manager** on Windows (with a DPAPI-protected key file as a fallback). On Windows both are tied to your Windows account: programs running as you can ask Windows for the key, so this protects the file at rest (backups, other accounts, a copied disk) but is not a defence against malware running as you. Keep the recovery key from Settings → Security somewhere safe; it is the only way to open the data on another machine or account.
+
+On Windows ScreenTime has no network code: no telemetry, no analytics, no update check, no crash reporter and no Steam Web API (game names come from Steam's local files). An automated test fails the build if application code imports a network library or loads a Windows networking DLL. Windows diagnostics (`screentime-diagnose`) never print keys, recovery keys or credentials and do not read window titles.
 
 ScreenTime needs to inspect your desktop environment to determine which application is currently focused. It records application usage sessions locally, but does **not** take screenshots or upload your activity to a server.
 
 [View the source code on GitHub](https://github.com/aliozertekin/ScreenTime)
 
-## Supported desktops
+## Supported platforms
+
+| Environment | Support |
+| --- | --- |
+| Linux X11 | Supported |
+| Linux Sway | Supported |
+| Linux Hyprland | Supported |
+| Linux GNOME Wayland | Supported (GNOME Shell extension) |
+| Linux KDE Wayland | Supported (KWin script) |
+| Windows 10/11 (64-bit) | Supported |
+
+### Supported desktops (Linux)
 
 | Environment           | Support               |
 | --------------------- | --------------------- |
@@ -80,6 +96,30 @@ makepkg -si
 ```
 
 The package installs ScreenTime together with its desktop entry, icon, systemd service, and Wayland helper components.
+
+### Windows
+
+**Supported versions:** 64-bit Windows 10 and Windows 11. No administrator rights are needed to install or run ScreenTime, and nothing else (Python, GTK, MSYS2) has to be installed.
+
+**Install:** download `ScreenTime-<version>-setup.exe` from the releases page and run it. It installs for your account only and adds a Start Menu entry. A portable `.zip` is also provided (extract it anywhere and run `ScreenTime.cmd`). The installer is not code-signed, so Windows SmartScreen may show an "unknown publisher" warning the first time.
+
+**First launch:** open *ScreenTime* from the Start Menu. Open **Settings** and switch on *Start tracking automatically at login*. This registers a per-user Task Scheduler task (`\ScreenTime\Daemon`) that starts only the background tracker, never the window. You can close the window at any time (or minimise it to the tray); tracking continues.
+
+**Automatic startup:** if the task is later deleted or points at an old install path, ScreenTime repairs it the next time you open it, but only if you had startup enabled. Turning it off removes the task and stops the daemon.
+
+**Data location:** `%LOCALAPPDATA%\ScreenTime` (encrypted store, logs) and `%APPDATA%\ScreenTime` (non-secret settings, key fallback).
+
+**Diagnostics:** Settings → Diagnostics, or run *ScreenTime diagnostics* from the Start Menu (`screentime-diagnose`). It reports the foreground, idle and power-event backends, autostart state, store and key backend, and Steam status, without any secrets.
+
+**Uninstall:** use *Settings → Apps → ScreenTime*. This stops the daemon, removes the startup task and the program files. You are asked whether to also delete your usage history and its encryption key; the default is to **keep** it. Silent uninstalls keep data unless you pass `/DELETEDATA=1`.
+
+**Known limitations**
+
+* Windows with higher privileges than ScreenTime (an elevated admin window, some system or anti-cheat protected processes) cannot be identified. While one is focused, ScreenTime records *no data* rather than guessing.
+* The desktop, taskbar, lock screen and ScreenTime's own window are not counted as app usage.
+* Locking the PC or turning the display off is handled as idle (after the idle timeout), not as sleep. Only real suspend/hibernate is treated as sleep.
+* Windows' newer "Modern Standby" does not always notify desktop apps before sleeping. ScreenTime then uses a sleep-excluding clock and a clock-drift check, so sleep time is still never counted, but the open session may be closed a tick late.
+* The Windows key protection is account-bound (see Privacy). There is no ARM64 build yet.
 
 ### Manual installation
 
@@ -148,7 +188,7 @@ For example, switching between several Firefox windows continues to count as Fir
 
 Time spent while the computer is suspended is not counted.
 
-When the computer wakes, tracking resumes for the currently focused application.
+When the computer wakes, tracking resumes for the currently focused application. On Windows the open session is closed from the system's suspend notification, and a clock-drift check catches any notification that never arrives.
 
 ## Steam games
 
@@ -216,6 +256,31 @@ Settings include:
 * Minimize to tray
 * Diagnostics
 * Statistics cache rebuilding
+
+### Themes
+
+Themes are chosen in Settings and apply to every view. On Windows the *System colors* theme follows the Windows light/dark setting and accent colour.
+
+| Theme | Name |
+| --- | --- |
+| `system` | System colors |
+| `default` | ScreenTime |
+| `light` | Light |
+| `dark` | Dark |
+| `gruvbox-dark` | Gruvbox Dark |
+| `gruvbox-light` | Gruvbox Light |
+| `nord` | Nord |
+| `dracula` | Dracula |
+| `solarized-dark` | Solarized Dark |
+| `solarized-light` | Solarized Light |
+| `catppuccin-mocha` | Catppuccin Mocha |
+| `catppuccin-latte` | Catppuccin Latte |
+| `tokyo-night` | Tokyo Night |
+| `one-dark` | One Dark |
+| `rose-pine` | Rose Pine |
+| `rose-pine-dawn` | Rose Pine Dawn |
+| `high-contrast-dark` | High Contrast Dark |
+| `high-contrast-light` | High Contrast Light |
 
 ## Excluding applications
 
@@ -319,10 +384,11 @@ Check the helper status under:
 ScreenTime stores its data locally:
 
 ```text
-~/.local/share/screentime/screentime.db
+Linux:   ~/.local/share/screentime/screentime.sec
+Windows: %LOCALAPPDATA%\ScreenTime\screentime.sec
 ```
 
-The database contains your application usage history and settings.
+The database (encrypted at rest) contains your application usage history and settings.
 
 There is no separate online account or cloud history.
 
@@ -361,6 +427,8 @@ sudo pacman -Rns screentime
 ```
 
 The uninstall script handles remaining per-user files such as autostart configuration and Wayland helpers.
+
+On Windows, uninstall from *Settings → Apps → ScreenTime* (see the Windows section above); the dialog lets you keep or delete your data.
 
 ## Development
 
