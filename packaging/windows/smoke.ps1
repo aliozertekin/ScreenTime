@@ -42,7 +42,8 @@ function Run-Cli($root, [string[]]$args_, [int]$timeoutSec = 0) {
 
 if ($Mode -eq "Installer") {
   Assert (Test-Path $Setup) "installer exists: $Setup"
-  $p = Start-Process $Setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=`"$InstallDir`"" -Wait -PassThru
+  $p = Start-Process $Setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=`"$InstallDir`"" -PassThru
+  if (-not $p.WaitForExit(300000)) { $p.Kill(); Assert $false "silent install finished within 5 minutes" }   # never hang the job
   Assert ($p.ExitCode -eq 0) "silent install exits 0 (got $($p.ExitCode))"
   $Bundle = $InstallDir
 }
