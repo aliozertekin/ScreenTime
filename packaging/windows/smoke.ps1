@@ -58,7 +58,15 @@ Assert ($r.Code -eq 0 -and $r.Out -match "gtk 4") "bundled GTK4 + libadwaita imp
 # --- diagnostics reports Windows backends and leaks no secrets
 $r = Run-Cli $Bundle @("-m","screentime.diagnostics")
 Assert ($r.Code -eq 0 -and $r.Out -match "OS:\s+Windows") "diagnostics reports OS: Windows"
-Assert ($r.Out -notmatch "recovery|BEGIN|password") "diagnostics output contains no secret-looking text"
+# Look for the SHAPE of a secret, not for words: the report's own disclaimer says "...recovery keys or credentials".
+$secretShapes = @(
+  '\b[A-Z2-7]{4}(-[A-Z2-7]{4}){5,}\b',      # grouped Base32 recovery key
+  '\b[0-9a-fA-F]{32,}\b',                   # raw key / store id in hex
+  '[A-Za-z0-9+/]{40,}={0,2}',                # base64 key material
+  'BEGIN [A-Z ]*(KEY|CERTIFICATE)'           # PEM blocks
+)
+$leaks = $secretShapes | Where-Object { $r.Out -match $_ }
+Assert (-not $leaks) "diagnostics output contains no secret-looking text"
 
 # --- GUI starts and stays up (needs a desktop session; skipped if the host has none)
 $gui = Start-Process (Join-Path $Bundle "bin\screentime-gui.exe") -ArgumentList "-m","screentime.gui.app" -PassThru
