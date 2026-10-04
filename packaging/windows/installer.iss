@@ -1,5 +1,5 @@
 ; Inno Setup 6 script. Per-user install, no administrator rights.
-; Build:  ISCC /DAppVersion=1.3.0 /DBundleDir=..\..\dist\ScreenTime installer.iss
+; Build:  ISCC /DAppVersion=<version> /DBundleDir=..\..\dist\ScreenTime installer.iss
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif

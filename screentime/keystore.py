@@ -87,6 +87,11 @@ def decode_recovery_key(text: str) -> bytes:
     if len(raw) != KEY_BYTES + 4:
         raise ValueError("recovery key has the wrong length")
     key, check = raw[:KEY_BYTES], raw[KEY_BYTES:]
+    # The last Base32 character carries two unused bits; a typo that only changes
+    # those decodes to the same bytes. Insist on the canonical spelling so EVERY
+    # single-character typo is caught (this made the typo test flaky ~1 run in 30).
+    if base64.b32encode(raw).decode().rstrip("=") != cleaned.rstrip("="):
+        raise ValueError("recovery key is not spelled canonically -- check for typos")
     if hashlib.sha256(key).digest()[:4] != check:
         raise ValueError("recovery key checksum does not match -- check for typos")
     return key

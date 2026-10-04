@@ -67,16 +67,17 @@ confirmed by hand on a laptop before a release.
 
 ## Building
 
-See `packaging/windows/README.md`; `scripts/build-windows.ps1` runs the whole pipeline.
+`./scripts/build-windows.sh` on Linux runs the whole pipeline in a container (`packaging/windows/README.md`, [RELEASING.md](RELEASING.md)). `runtime_env.py` generates the gdk-pixbuf loader cache at first launch because the bundle is relocatable.
 
 ## Verification status (honest)
 
-Done and passing on Linux: the full existing suite (one pre-existing failure was fixed: the
-README theme table) plus the Windows unit tests against fakes.
+Done and passing on Linux: the full existing suite plus the Windows unit tests against fakes, and tests of the build
+tooling (MSYS2 resolver/downloader against a synthetic repository with hash verification, bundle assembly and pruning,
+the DLL-import checker on a real PE file, deterministic zip, manifest, shellcheck, failure paths of the host script).
 
-**Not yet done:** nothing in this change has been executed on real Windows. In particular
-unverified until the `windows` CI job and a clean-machine run have passed: the ctypes
-prototypes against the real DLLs, the message-window/tray threads, `schtasks` XML
-acceptance, the MSYS2 bundle's completeness (typelibs/loaders), the Inno Setup script, the
-renamed-`pythonw.exe` launchers, the "Restart Windows -> daemon starts" step, and real
-sleep/resume. Treat the Windows release as a release candidate until those pass.
+**Not yet done:** nothing here has been executed on real Windows, and the container pipeline itself (image build, real
+MSYS2 downloads, Inno Setup under Wine, Wine smoke test) has not been run end to end. Unverified until a real build and a
+clean-machine run: the ctypes prototypes against the real DLLs, the message-window/tray threads, `schtasks` XML
+acceptance, that the MSYS2 ucrt64 runtime is complete enough (the static DLL check helps but cannot prove GTK works),
+the gdk-pixbuf loader-cache workaround, the renamed-`pythonw.exe` launchers, GUI behaviour under Wine, the Inno Setup
+script, "Restart Windows -> daemon starts", and real sleep/resume. Treat the Windows release as a release candidate.

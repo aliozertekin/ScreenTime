@@ -1,0 +1,13 @@
+# Root MSYS2 (mingw64) packages for the Windows runtime. The full dependency
+# closure is resolved from the repository database and recorded, with SHA-256
+# hashes, in msys2.lock. Names are without the "mingw-w64-x86_64-" prefix.
+python
+python-gobject
+python-cairo
+python-psutil
+python-cryptography
+gtk4
+libadwaita
+gdk-pixbuf2
+librsvg
+adwaita-icon-theme

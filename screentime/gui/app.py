@@ -101,6 +101,9 @@ _OPEN_ERRORS = (storage.StorageError, storage.SecureStoreError, storage.KeyStore
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if _platform.is_windows():
+        from ..platform.windows import runtime_env
+        runtime_env.prepare()           # packaged build: per-location gdk-pixbuf loader cache (no-op elsewhere)
     try:
         app = ScreenTimeApp()
     except _OPEN_ERRORS as e:

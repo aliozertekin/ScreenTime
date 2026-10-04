@@ -1,36 +1,61 @@
 # Windows packaging
 
-Approach: **MSYS2 (MINGW64) runtime, bundled** -- not PyInstaller.
-ScreenTime needs GTK4 + libadwaita + PyGObject + GObject-Introspection typelibs +
-gdk-pixbuf loaders + GSettings schemas. MSYS2 is the platform both GTK and
-PyGObject document and test on Windows, and its GLib/GTK builds are relocatable,
-so we copy the exact runtime the app was tested against into one folder.
-PyInstaller can freeze PyGObject apps, but each typelib/loader/schema/DLL has to
-be discovered through hooks and a missing one only shows at runtime; here the
-dependency closure is computed from the real DLL graph (`ldd`) and verified by
-starting the bundled interpreter and importing Gtk/Adw.
+Everything here is driven from Linux by **`./scripts/build-windows.sh`** (see [docs/RELEASING.md](../../docs/RELEASING.md)).
+Nothing in this folder needs a Windows machine, a VM, MSYS2 on the host, or GitHub Actions.
 
-Layout of the result (`dist/ScreenTime/`):
+## How the build works
 
-    bin/                python.exe, pythonw.exe, all DLLs
-    bin/screentime-daemon.exe   copy of pythonw.exe  (Task Manager shows this name)
-    bin/screentime-gui.exe      copy of pythonw.exe
-    lib/ share/         Python stdlib + site-packages, typelibs, schemas, icons
-    app/screentime/     the application
-    ScreenTime.cmd      (portable build only)
+```
+host:       scripts/build-windows.sh          picks podman/docker, reads the version, caches, reports
+container:  Containerfile                      Ubuntu 24.04 + Wine + Python + zstd + rsvg/ImageMagick
+            container/build.sh                 the pipeline below
+```
 
-Pipeline (`scripts/build-windows.ps1`, also run by `.github/workflows/windows.yml`):
+1. **`msys2_fetch.py`** gets the Windows runtime. MSYS2 packages are plain zstd tarballs, so we do *not* run
+   MSYS2 or pacman under Wine. We read the package database, resolve the dependency closure of `packages.txt`
+   (Python, PyGObject, pycairo, psutil, cryptography, GTK4, libadwaita, librsvg, icon themes), pin it in
+   **`msys2.lock`** (file names + SHA-256), download with hash verification and unpack into one tree.
+2. **`assemble_bundle.py`** builds the relocatable folder: prunes headers/docs/locales/tcl-tk/tests, keeps DLLs,
+   typelibs, schemas (compiled with the Linux `glib-compile-schemas`; the format is OS independent), icons,
+   fontconfig and the Python stdlib; copies the app; makes `screentime.ico` from the SVG; creates the
+   `screentime-{daemon,gui,cli}.exe` launchers and `ScreenTime.cmd`.
+3. **`bundle_check.py`** validates the bundle statically: required GTK/Adw/GI/Python files exist, and **every DLL
+   imported by every `.dll/.exe/.pyd` is either in the bundle or a Windows system DLL** (this is the "missing DLL"
+   error a user would otherwise hit). Unknown system DLLs can be allow-listed in `system-dlls.txt`.
+4. **Wine smoke test** imports GTK4, libadwaita, PyGObject, cairo, psutil, cryptography and the ScreenTime Windows
+   modules from the bundle only, then starts the GUI for 25 s looking for missing-library errors.
+5. **Inno Setup 6** (`installer.iss`, run under Wine; unchanged from the validated script) builds the per-user,
+   no-admin installer.
+6. **`make_zip.py`** builds the deterministic portable zip; **`make_manifest.py`** writes `build-manifest.txt`
+   (version, commit, date, SHA-256 of both artifacts, tool versions) and `SHA256SUMS`.
 
-1. `bundle.sh`   inside MSYS2: install pinned packages, assemble `dist/ScreenTime`.
-2. `smoke.ps1 -Bundle`  import Gtk4/Adw, run diagnostics from the bundle.
-3. Inno Setup    `installer.iss` -> `ScreenTime-<version>-setup.exe` (per-user, no admin).
-4. zip           `ScreenTime-<version>-portable.zip`.
-5. `smoke.ps1 -Installer`  silent install, daemon start/stop, uninstall, assertions.
+## Files
 
-Reproducibility: `bundle.sh` writes `build-manifest.txt` (every MSYS2 package
-and version used). Commit the first good one as `msys2-packages.lock`;
-afterwards `bundle.sh --verify-lock` fails the build if MSYS2's rolling repos
-drifted, and CI pins the runner image, action versions and Inno Setup version.
+| File | Purpose |
+| --- | --- |
+| `toolchain.env` | pins: base image, Inno Setup version/URL, MSYS2 environment and mirrors |
+| `packages.txt` | root MSYS2 packages |
+| `msys2.lock` | exact package files + SHA-256 (created on the first build; **commit it**) |
+| `toolchain.lock` | SHA-256 of the Inno Setup installer (created on the first build; **commit it**) |
+| `system-dlls.txt` | extra Windows DLL names the bundle check should accept |
+| `installer.iss` | Inno Setup script |
+| `smoke.ps1` | optional check to run on a real Windows machine against the bundle or installer |
 
-STATUS: written but not yet exercised on a clean Windows machine -- see the
-"Verification status" section of docs/windows-developer.md.
+## Why not PyInstaller / a Python-only exe
+
+GTK4 + libadwaita need typelibs, schemas, icons, loaders and ~100 DLLs that PyInstaller only finds through hooks, and
+a missing one shows up at run time on the user's machine. Taking the known-good MSYS2 packages whole, then checking
+the DLL graph statically, is more predictable.
+
+## Reproducibility and limits
+
+* Same commit + same `msys2.lock` + same `toolchain.env` give the same bundle and the same zip bytes
+  (timestamps follow the commit date). The Inno Setup `.exe` is not bit-for-bit reproducible.
+* The base image is a floating `ubuntu:24.04` tag and Ubuntu packages (Wine) are not pinned; the manifest records the
+  Wine version used.
+* The first lock is created over HTTPS from the official MSYS2 mirror and then pinned by hash; package signatures
+  are not verified.
+* Status: the tooling is covered by tests on synthetic packages and a real PE sample, but the container build,
+  Inno Setup under Wine, and the resulting installer have **not** been run end to end yet (no container engine or
+  access to the MSYS2/Inno download hosts where this was written). See "Verification status" in
+  [docs/windows-developer.md](../../docs/windows-developer.md).

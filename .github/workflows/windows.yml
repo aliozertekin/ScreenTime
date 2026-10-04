@@ -1,50 +1,40 @@
+# OPTIONAL. The project does not depend on this workflow: releases are built locally with
+# ./scripts/build-windows.sh (see docs/RELEASING.md). This only runs the same script on a hosted
+# Linux runner and, if available, smoke-tests the installer on a real Windows runner.
 name: windows
 on:
-  push: { branches: [main] }
-  pull_request:
   workflow_dispatch:
+  pull_request:
+    paths: ["packaging/windows/**", "scripts/build-windows.sh", "screentime/platform/**"]
 
 jobs:
-  unit:                       # all unit tests, incl. the Windows logic against a fake Win32 layer
+  tests:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y python3-gi python3-psutil python3-cryptography python3-pytest gir1.2-glib-2.0 python3-cairo
+      - run: sudo apt-get update && sudo apt-get install -y python3-gi python3-psutil python3-cryptography python3-pytest gir1.2-glib-2.0 python3-cairo zstd librsvg2-bin imagemagick python3-pefile shellcheck
       - run: python3 -m pytest -q
 
-  windows:
-    needs: unit
-    runs-on: windows-2022
-    defaults: { run: { shell: pwsh } }
+  build:
+    needs: tests
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: rsync
-      - name: Windows tests (unit + live, real Win32)
-        shell: msys2 {0}
-        env: { SCREENTIME_LIVE: "1" }
-        run: |
-          pacman -S --needed --noconfirm mingw-w64-x86_64-python mingw-w64-x86_64-python-gobject mingw-w64-x86_64-python-psutil mingw-w64-x86_64-python-cryptography mingw-w64-x86_64-python-pytest mingw-w64-x86_64-python-cairo mingw-w64-x86_64-gtk4 mingw-w64-x86_64-libadwaita
-          python -m pytest -q tests/test_windows_*.py tests/test_no_network_windows.py tests/integration_windows
-      - name: Install Inno Setup (pinned)
-        run: choco install innosetup --version=6.4.3 -y --no-progress
-      - name: Build bundle, installer, portable zip
-        run: ./scripts/build-windows.ps1 -Iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-      - name: Verify artifacts
-        run: |
-          $v = (Select-String pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          foreach ($f in "dist/ScreenTime-$v-setup.exe","dist/ScreenTime-$v-portable.zip","dist/ScreenTime/build-manifest.txt") { if (-not (Test-Path $f)) { throw "missing $f" } }
-      - name: Install -> run -> uninstall smoke test
-        run: |
-          $v = (Select-String pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          ./packaging/windows/smoke.ps1 -Mode Installer -Setup "$PWD/dist/ScreenTime-$v-setup.exe"
+      - run: sudo apt-get install -y podman
+      - run: ./scripts/build-windows.sh --non-interactive --engine podman
       - uses: actions/upload-artifact@v4
         with:
           name: screentime-windows
-          path: |
-            dist/ScreenTime-*-setup.exe
-            dist/ScreenTime-*-portable.zip
-            dist/ScreenTime/build-manifest.txt
+          path: dist/ScreenTime-*
+
+  smoke-on-windows:
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: screentime-windows, path: dist }
+      - shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist -Filter "ScreenTime-*-setup.exe" | Select-Object -First 1).FullName
+          ./packaging/windows/smoke.ps1 -Mode Installer -Setup $setup

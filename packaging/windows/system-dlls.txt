@@ -1,0 +1,2 @@
+# Extra DLL names (without .dll) that ship with Windows 10/11 and may be imported by the bundle,
+# in addition to the built-in list in bundle_check.py. One per line.

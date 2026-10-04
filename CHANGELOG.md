@@ -4,20 +4,37 @@ Versions follow semantic versioning. The version lives in `pyproject.toml`,
 `PKGBUILD` (`pkgver`) and `screentime/__init__.py` (`__version__`);
 `tests/test_version.py` fails if they disagree.
 
-## Unreleased — Windows support
+## 1.4.0 — Windows support; documentation reorganised
 
-* **Windows 10/11 (64-bit)** as a first-class platform, same app and same encrypted store.
-  New `screentime/platform/` layer with one central platform switch; Linux behaviour unchanged.
+**Windows 10/11 (64-bit)** is now a platform of the same app, daemon and encrypted store
+(release candidate: tested against a simulated Win32 layer, not yet on real machines).
+* New `screentime/platform/` layer with one central platform switch; Linux behaviour is unchanged.
 * Native Win32 foreground detection (executable identity, never window titles), `GetLastInputInfo`
-  idle detection, `WM_POWERBROADCAST` suspend/resume with a sleep-excluding clock and a drift guard.
-* Per-user named-mutex single instance, Task Scheduler start-at-login (self-healing, never re-enables
-  a startup the user turned off), Credential Manager key storage with a DPAPI fallback, Windows tray
-  icon, Windows light/dark + accent for the existing theme system.
-* Offline Steam: native Windows libraries, `steam_app_<AppID>` keys for games found by install folder.
-* `screentime-diagnose` cross-platform diagnostics (no secrets, no titles).
-* Packaging: MSYS2-based relocatable bundle, per-user Inno Setup installer, portable zip, CI workflow.
-* Fixed: exe-path Steam lookup is case-insensitive on every OS; the README theme table the test suite
-  requires was missing.
+  idle detection, `WM_POWERBROADCAST` suspend/resume, a sleep-excluding clock
+  (`QueryUnbiasedInterruptTime`) plus a wall-vs-monotonic drift guard for missed suspend events.
+* Per-user named-mutex single instance with a graceful stop event; Task Scheduler start-at-login
+  (self-healing, never re-enables a startup you turned off); Credential Manager key storage with a
+  DPAPI fallback; Windows tray icon; Windows light/dark and accent for the existing themes.
+* Offline Steam on Windows: native libraries, games recognised by install folder, same
+  `steam_app_<AppID>` keys as Linux.
+* `screentime-diagnose`: cross-platform diagnostics (no secrets, no titles, never creates a store).
+* Packaging: **`./scripts/build-windows.sh` builds the installer and portable zip entirely from Linux**
+  (podman/docker only; no Windows, VM, host Wine or GitHub Actions). It fetches the MSYS2 ucrt64 runtime
+  as hash-pinned packages without running any Windows code, assembles a relocatable bundle, statically checks
+  that every imported DLL is present, smoke-tests it under Wine, builds the per-user no-admin Inno Setup
+  installer and a deterministic zip, and writes `build-manifest.txt` + `SHA256SUMS`. Uninstall keeps data by
+  default; `scripts/windows-dev.cmd` runs the app from a source checkout; the GitHub workflow is optional.
+  The packaged build creates its gdk-pixbuf loader cache at first launch (`runtime_env.py`).
+* Fixed: the recovery-key decoder accepted a typo in the last character's unused bits (the typo test was
+  flaky about 1 run in 30); the canonical spelling is now enforced.
+* Fixed: after a handled resume the Windows drift guard compared against pre-sleep clocks and split a
+  session; Steam exe-path lookup is now case-insensitive on every OS.
+
+**Documentation**
+* The README is now a short user guide. The former 1,000-line README was split into `docs/`:
+  `ARCHITECTURE`, `DEVELOPMENT`, `LINUX`, `STEAM`, `THEMES`, `SECURITY`, plus `WINDOWS` (user guide) and
+  `windows-developer`, `RELEASING`. A test checks that README/docs links and script paths exist.
+* Version is documented in `docs/DEVELOPMENT.md` ("Versioning and releases").
 
 ## 1.3.0 — Encrypted local database; 12 more themes
 
