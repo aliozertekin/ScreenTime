@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -100,17 +101,28 @@ _OPEN_ERRORS = (storage.StorageError, storage.SecureStoreError, storage.KeyStore
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if _platform.is_windows():
-        from ..platform.windows import runtime_env
-        runtime_env.prepare()           # packaged build: per-location gdk-pixbuf loader cache (no-op elsewhere)
+        # pythonw has no console: log to %LOCALAPPDATA%\\ScreenTime\\logs\\gui.log and capture crashes there.
+        from ..platform.windows import logging_setup, runtime_env
+        logging_setup.configure(name="gui.log")
+        logging_setup.install_crash_handlers("gui")
+        runtime_env.configure_renderer()    # software renderer unless GSK_RENDERER is set (VMs/RDP/CI have no GL)
+        runtime_env.prepare()               # packaged build: per-location gdk-pixbuf loader cache (no-op elsewhere)
+    else:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         app = ScreenTimeApp()
     except _OPEN_ERRORS as e:
         log.error("cannot open the protected database: %s", e)
         from .unlock import LockedApp
         return LockedApp(e).run(None)
-    return app.run(None)
+    except Exception:
+        log.exception("ScreenTime could not start")
+        raise
+    log.info("ScreenTime window starting (renderer=%s)", os.environ.get("GSK_RENDERER", "default"))
+    rc = app.run(None)
+    log.info("ScreenTime window closed (exit status %s)", rc)
+    return rc
 
 
 if __name__ == "__main__":

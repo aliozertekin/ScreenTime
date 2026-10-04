@@ -28,10 +28,12 @@ function ConvertTo-QuotedArg([string]$a) {
   return '"' + $a + '"'
 }
 
-function Run-Cli($root, [string[]]$args_) {
+function Run-Cli($root, [string[]]$args_, [int]$timeoutSec = 0) {
   $exe = Join-Path $root "bin\screentime-cli.exe"
   $argLine = ($args_ | ForEach-Object { ConvertTo-QuotedArg $_ }) -join " "
-  $p = Start-Process -FilePath $exe -ArgumentList $argLine -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$tmp\out.txt" -RedirectStandardError "$tmp\err.txt"
+  $p = Start-Process -FilePath $exe -ArgumentList $argLine -NoNewWindow -PassThru -RedirectStandardOutput "$tmp\out.txt" -RedirectStandardError "$tmp\err.txt"
+  $limit = if ($timeoutSec -gt 0) { $timeoutSec * 1000 } else { -1 }
+  if (-not $p.WaitForExit($limit)) { $p.Kill(); $p.WaitForExit() }     # a still-running GUI after $timeoutSec s is a success for the re-run
   # Get-Content -Raw yields $null (not "") for an empty file -- and [string](...) keeps it $null -- while the assert
   # messages below call .Trim() on these, eagerly, even when the assertion passes. A clean run has empty stderr,
   # so wrap in "$( )", which always produces a string.
@@ -68,9 +70,20 @@ $secretShapes = @(
 $leaks = $secretShapes | Where-Object { $r.Out -match $_ }
 Assert (-not $leaks) "diagnostics output contains no secret-looking text"
 
-# --- GUI starts and stays up (needs a desktop session; skipped if the host has none)
+# --- GUI starts and stays up (needs a desktop session)
 $gui = Start-Process (Join-Path $Bundle "bin\screentime-gui.exe") -ArgumentList "-m","screentime.gui.app" -PassThru
 Start-Sleep 8
+if ($gui.HasExited) {
+  Write-Host "GUI exited with code $($gui.ExitCode) within 8 s. Evidence follows."
+  foreach ($f in "gui.log","gui.crash") {
+    $path = "$tmp\L\ScreenTime\logs\$f"
+    if (Test-Path $path) { Write-Host "----- $f"; Get-Content $path -Tail 60 } else { Write-Host "----- $f: not written" }
+  }
+  # Re-run with the console interpreter so Python/GTK messages (which pythonw discards) land in files.
+  $env:GSK_RENDERER = "cairo"
+  $rr = Run-Cli $Bundle @("-X","faulthandler","-m","screentime.gui.app") 12
+  Write-Host "----- console re-run: exit code $($rr.Code)"; Write-Host $rr.Out; Write-Host $rr.Err
+}
 Assert (-not $gui.HasExited) "GUI starts and keeps running"
 Stop-Process -Id $gui.Id -Force -ErrorAction SilentlyContinue
 

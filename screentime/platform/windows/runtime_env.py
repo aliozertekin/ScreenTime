@@ -72,3 +72,17 @@ def prepare(env: Optional[MutableMapping[str, str]] = None, executable: Optional
         tmp.replace(cache)
     env["GDK_PIXBUF_MODULE_FILE"] = str(cache)
     return cache
+
+
+def configure_renderer(env: Optional[MutableMapping[str, str]] = None) -> bool:
+    """Default GTK to its Cairo (software) renderer on Windows.
+
+    GTK4's default GL renderer needs a working WGL/ANGLE driver. In virtual machines, remote desktops, CI runners
+    and on some old drivers context creation fails and the window never appears (or the process exits). ScreenTime
+    is a lists-and-charts dashboard that the Cairo renderer draws fine, so reliability wins over GPU use. Anyone
+    can still opt in to GL by setting GSK_RENDERER themselves (for example GSK_RENDERER=gl). Returns True if set."""
+    env = os.environ if env is None else env
+    if "GSK_RENDERER" in env:
+        return False
+    env["GSK_RENDERER"] = "cairo"
+    return True

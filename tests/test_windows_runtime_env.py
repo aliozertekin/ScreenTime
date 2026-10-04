@@ -56,3 +56,38 @@ def test_failure_to_generate_is_not_fatal(tmp_path):
     assert "GDK_PIXBUF_MODULE_FILE" not in env
     def raising(cmd, **kw): raise OSError("blocked")
     assert re_.prepare(env, str(root / "bin" / "screentime-gui.exe"), tmp_path / "r", raising) is None
+
+
+def test_renderer_defaults_to_cairo_unless_the_user_chose():
+    env = {}
+    assert re_.configure_renderer(env) is True and env["GSK_RENDERER"] == "cairo"
+    env = {"GSK_RENDERER": "gl"}
+    assert re_.configure_renderer(env) is False and env["GSK_RENDERER"] == "gl"
+
+
+def test_crash_handlers_write_tracebacks_and_native_faults_to_the_log_dir(tmp_path, monkeypatch):
+    import faulthandler, logging, sys
+    from screentime import platform as plat
+    from screentime.platform.windows import logging_setup
+    monkeypatch.setenv("SCREENTIME_PLATFORM", "windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "L"))
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    plat.reset_for_tests()
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    try:
+        logging_setup.configure(name="gui.log")
+        logging_setup.install_crash_handlers("gui")
+        sys.excepthook(RuntimeError, RuntimeError("boom"), None)
+        for h in root.handlers:
+            h.flush()
+        text = (tmp_path / "L" / "ScreenTime" / "logs" / "gui.log").read_text()
+        assert "uncaught exception" in text and "boom" in text
+        assert (tmp_path / "L" / "ScreenTime" / "logs" / "gui.crash").exists()
+    finally:
+        faulthandler.disable()
+        for h in list(root.handlers):
+            root.removeHandler(h); h.close()
+        for h in saved:
+            root.addHandler(h)
+        plat.reset_for_tests()

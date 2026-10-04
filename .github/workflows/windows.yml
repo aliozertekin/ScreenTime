@@ -2,10 +2,13 @@
 # ./scripts/build-windows.sh (see docs/RELEASING.md). This only runs the same script on a hosted
 # Linux runner and, if available, smoke-tests the installer on a real Windows runner.
 name: windows
+permissions:
+  contents: read
 on:
   workflow_dispatch:
   push:
-    paths: ["packaging/windows/**", "scripts/build-windows.sh", "screentime/platform/**", ".github/workflows/windows.yml"]
+    branches: [main]      # every push to main builds downloadable artifacts (Actions run page -> Artifacts)
+    tags: ["v*"]          # a tag like v1.4.0 additionally creates a draft GitHub Release with the files attached
   pull_request:
     paths: ["packaging/windows/**", "scripts/build-windows.sh", "screentime/platform/**", ".github/workflows/windows.yml"]
 
@@ -51,3 +54,31 @@ jobs:
           }
           Write-Host "Using installer: $($setupFile.FullName)"
           ./packaging/windows/smoke.ps1 -Mode Installer -Setup $setupFile.FullName
+
+  # Tag push (vX.Y.Z) -> DRAFT release with the installer, portable zip and checksums attached.
+  # Publish the draft after you have tried the installer; change --draft to publish immediately if you prefer.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: screentime-windows, path: dist }
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          grep -q "^version=${version}$" dist/build-manifest.txt || { echo "tag ${GITHUB_REF_NAME} does not match the built version:"; cat dist/build-manifest.txt; exit 1; }
+          awk -v v="$version" '/^## /{p = index($0, "## " v " ") == 1} p' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "ScreenTime ${version}" > notes.md
+          assets=(dist/ScreenTime-"${version}"-setup.exe dist/ScreenTime-"${version}"-portable.zip dist/SHA256SUMS dist/build-manifest.txt)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --draft --title "ScreenTime ${version}" --notes-file notes.md
+          fi
