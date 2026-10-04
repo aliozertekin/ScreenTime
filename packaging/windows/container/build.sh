@@ -66,10 +66,14 @@ else
   echo "NOTE: no pinned checksum for Inno Setup yet; recorded $inno_sha (commit packaging/windows/toolchain.lock)."
 fi
 ISCC="$WINEPREFIX/drive_c/Program Files (x86)/Inno Setup 6/ISCC.exe"
-if [[ ! -f "$ISCC" ]]; then
+# The prefix lives in the persistent cache: reinstall whenever the pinned installer changed, so an
+# ISCC.exe left by an older pin is never reused while the manifest claims the new version.
+INNO_MARK="$WINEPREFIX/.screentime-inno-installed"
+if [[ ! -f "$ISCC" || "$(cat "$INNO_MARK" 2>/dev/null)" != "$INNO_VERSION $inno_sha" ]]; then
   wine_x wineboot -u >/dev/null 2>&1 || true
   wine_x "$INNO_EXE" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- >/dev/null 2>&1 || true
   [[ -f "$ISCC" ]] || die "Inno Setup did not install under Wine (expected $ISCC). Re-run with --clean --verbose."
+  echo "$INNO_VERSION $inno_sha" > "$INNO_MARK"
 fi
 
 if [[ "${SKIP_SMOKE:-0}" == 1 ]]; then

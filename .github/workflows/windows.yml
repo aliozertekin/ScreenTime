@@ -4,8 +4,10 @@
 name: windows
 on:
   workflow_dispatch:
+  push:
+    paths: ["packaging/windows/**", "scripts/build-windows.sh", "screentime/platform/**", ".github/workflows/windows.yml"]
   pull_request:
-    paths: ["packaging/windows/**", "scripts/build-windows.sh", "screentime/platform/**"]
+    paths: ["packaging/windows/**", "scripts/build-windows.sh", "screentime/platform/**", ".github/workflows/windows.yml"]
 
 jobs:
   tests:
@@ -20,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install -y podman
+      - run: sudo apt-get update && sudo apt-get install -y podman
       - run: ./scripts/build-windows.sh --non-interactive --engine podman
       - uses: actions/upload-artifact@v4
         with:

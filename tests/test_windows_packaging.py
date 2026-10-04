@@ -280,6 +280,20 @@ def test_host_script_fails_clearly_without_a_container_engine(tmp_path):
     assert r.returncode != 0 and "unknown option" in r.stderr
 
 
+def test_inno_setup_pin_url_and_checksum_agree():
+    """build.sh only WARNS when toolchain.lock has no entry for the pinned version, so a bump that forgets
+    the checksum would silently drop verification. Keep version, URL and lock in step."""
+    import re
+    env = dict(l.split("=", 1) for l in (PKG / "toolchain.env").read_text().splitlines()
+               if re.match(r"^[A-Z0-9_]+=", l))
+    ver, url = env["INNO_VERSION"], env["INNO_URL"]
+    exe = f"innosetup-{ver}.exe"
+    assert url.startswith("https://") and url.rsplit("/", 1)[1] == exe
+    lock = [l.split() for l in (PKG / "toolchain.lock").read_text().splitlines() if l.strip() and not l.startswith("#")]
+    pins = {name: sha for name, sha in lock}
+    assert re.fullmatch(r"[0-9a-f]{64}", pins.get(exe, "")), f"toolchain.lock has no valid SHA-256 for {exe}"
+
+
 def test_packaging_inputs_are_consistent():
     env = (PKG / "toolchain.env").read_text()
     assert "INNO_URL=" in env and "MSYS2_ENV=ucrt64" in env
