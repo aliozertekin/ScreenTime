@@ -208,6 +208,27 @@ def _open_existing(sp: Path, km: KeyManager, interactive: bool, wait: bool, poll
         raise
 
 
+def _dir_fsync_supported() -> bool:
+    """Can this OS fsync a directory? POSIX yes. Windows no: os.open() maps to the C runtime's _wopen, which calls
+    CreateFile without FILE_FLAG_BACKUP_SEMANTICS, and Windows refuses to hand out a directory handle without that
+    flag -- PermissionError(13) -- so there is nothing to fsync (NTFS journals the rename itself)."""
+    return not _platform.is_windows()
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a rename inside `path` durable (POSIX: fsync the directory after os.replace()).
+
+    Only "this OS has no directory fsync" is skipped. Every other failure -- EIO, or a PermissionError on a platform
+    where opening a directory is supposed to work -- propagates like any other step of creating the store."""
+    if not _dir_fsync_supported():
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _create_new(dd: Path, km: KeyManager, interactive: bool) -> SecureLog:
     """Create the store atomically: build it under a temporary name and swap it
     in only when complete, so being stopped mid-creation can never leave a
@@ -221,11 +242,7 @@ def _create_new(dd: Path, km: KeyManager, interactive: bool) -> SecureLog:
     try:
         SecureLog(tmp, key, create=True, store_id=store_id).close()
         os.replace(tmp, sp)
-        fd = os.open(dd, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _fsync_dir(dd)
     except BaseException:
         for suffix in _SIDECARS:
             secure_delete_file(Path(str(tmp) + suffix))
@@ -315,11 +332,7 @@ def _migrate_legacy(dd: Path, km: KeyManager, interactive: bool) -> SecureLog:
             raise MigrationError(f"verification failed for table(s) {diff}; your original database was left untouched")
 
         os.replace(tmp, sp)                                    # atomic
-        fd = os.open(dd, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _fsync_dir(dd)
     except BaseException:
         for suffix in _SIDECARS:
             secure_delete_file(Path(str(tmp) + suffix))
