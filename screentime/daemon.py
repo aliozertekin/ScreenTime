@@ -43,6 +43,8 @@ from .process_monitor import resolve_pid_to_app
 from . import wayland_setup
 from .instance_lock import InstanceLock
 from . import platform as _platform
+from . import notifications
+from .goals import GoalNotifier
 
 # While a backend is the honest "nothing available" one, re-run detection this
 # often. At login the session environment / compositor helper may simply not be
@@ -50,6 +52,7 @@ from . import platform as _platform
 # "unsupported" until the next restart, tracking nothing, while systemd (which
 # only restarts on a *crash*) reports it healthy.
 MAINTENANCE_INTERVAL_SECONDS = 600.0
+GOAL_CHECK_INTERVAL_SECONDS = 30.0      # how often usage is compared with the user's goals (local only)
 EXIT_CONFIG = 78      # EX_CONFIG: a problem a restart cannot fix (see the unit's RestartPreventExitStatus)
 REDETECT_INTERVAL_SECONDS = 20.0
 # Fail-safes for the suspend guard (see _suspend_guard_expired).
@@ -111,6 +114,8 @@ class Daemon:
             log.exception("Steam name repair failed (continuing)")
         self._last_redetect = time.monotonic()
         self._last_maintenance = 0.0
+        self._last_goal_check = float("-inf")
+        self.goal_notifier = GoalNotifier(db, notifications.create_notifier())
         self._was_idle = False
         self._steam_unresolved_logged: set = set()
         self._suspended = False
@@ -206,6 +211,18 @@ class Daemon:
         except Exception:
             log.exception("database maintenance failed (continuing)")
 
+    def _maybe_check_goals(self):
+        """Compare today's usage with the user's goals and show a desktop notification when a threshold
+        is crossed. Local only; a no-op unless the user enabled goals. Never allowed to disturb tracking."""
+        now = self._mono()
+        if now - self._last_goal_check < GOAL_CHECK_INTERVAL_SECONDS:
+            return
+        self._last_goal_check = now
+        try:
+            self.goal_notifier.check()
+        except Exception:
+            log.exception("goal check failed (continuing)")
+
     def _tick(self) -> bool:
         self._maybe_redetect()
         self._maybe_maintain()
@@ -244,6 +261,7 @@ class Daemon:
             self.session_manager.heartbeat()
         except Exception:
             log.exception("Error in tracking tick (continuing)")
+        self._maybe_check_goals()
         return True  # keep the GLib timeout source alive
 
     # --------------------------------------------------------- suspend/resume
