@@ -315,6 +315,54 @@ class Database:
             self._conn.execute("ROLLBACK")
             raise
 
+    @_writes
+    def merge_history(self, apps: list, sessions: list) -> tuple:
+        """Add history from a restored backup WITHOUT touching what is already here.
+
+        apps:     dicts with key, display_name, icon_name, desktop_file, excluded, first_seen, last_seen
+        sessions: dicts with app_key, start_time, end_time, last_heartbeat, day, end_reason
+        A session is skipped when the same app already has one starting at the same second, so restoring
+        the same backup twice (or onto the machine it came from) adds nothing. Existing apps keep their
+        name and excluded flag. Daily totals are bumped by exactly what was inserted.
+        Returns (apps_added, sessions_added, sessions_skipped)."""
+        added_apps = added = skipped = 0
+        ids: dict = {}
+        for a in apps:
+            row = self._conn.execute("SELECT id, first_seen, last_seen FROM apps WHERE key = ?", (a["key"],)).fetchone()
+            if row is None:
+                cur = self._conn.execute(
+                    "INSERT INTO apps(key, display_name, icon_name, desktop_file, excluded, first_seen, last_seen) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (a["key"], a["display_name"], a.get("icon_name"), a.get("desktop_file"),
+                     1 if a.get("excluded") else 0, int(a["first_seen"]), int(a["last_seen"])))
+                ids[a["key"]] = cur.lastrowid
+                added_apps += 1
+            else:
+                ids[a["key"]] = row["id"]
+                self._conn.execute("UPDATE apps SET first_seen = ?, last_seen = ? WHERE id = ?",
+                                   (min(row["first_seen"], int(a["first_seen"])),
+                                    max(row["last_seen"], int(a["last_seen"])), row["id"]))
+        for s_ in sessions:
+            app_id = ids.get(s_["app_key"])
+            if app_id is None:
+                app = self._conn.execute("SELECT id FROM apps WHERE key = ?", (s_["app_key"],)).fetchone()
+                app_id = app["id"] if app else None
+            start = int(s_["start_time"])
+            if app_id is None or self._conn.execute(
+                    "SELECT 1 FROM sessions WHERE app_id = ? AND start_time = ?", (app_id, start)).fetchone():
+                skipped += 1
+                continue
+            end = s_.get("end_time")
+            end = int(end) if end is not None else int(s_.get("last_heartbeat") or start)
+            end = max(end, start)
+            self._conn.execute(
+                "INSERT INTO sessions(app_id, start_time, end_time, last_heartbeat, day, end_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (app_id, start, end, end, s_["day"], s_.get("end_reason") or "restored"))
+            self._bump_daily_total(app_id, s_["day"], end - start, session_delta=1)
+            added += 1
+        return added_apps, added, skipped
+
     def get_open_session(self) -> Optional[sqlite3.Row]:
         return self._conn.execute("SELECT * FROM sessions WHERE end_time IS NULL").fetchone()
 

@@ -302,6 +302,12 @@ class SecureLog:
         """Fold the WAL into the main file (still only ciphertext either way)."""
         self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+    def make_single_file(self):
+        """Fold the WAL in and leave the file in rollback-journal mode, so it is ONE self-contained file
+        (no -wal/-shm beside it). Used for backups that are copied around."""
+        self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self._db.execute("PRAGMA journal_mode=DELETE")
+
     def close(self):
         try:
             self.rollback()

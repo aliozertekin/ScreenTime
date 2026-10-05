@@ -6,6 +6,9 @@
     screentime-security import-recovery-key    restore a lost key from a recovery key
     screentime-security move-key-to-keyring    move the key from a key file into the keyring
     screentime-security compact                fold the log into an encrypted snapshot
+    screentime-security backup [FILE]          write an encrypted backup (.screentime)
+    screentime-security verify-backup FILE     check a backup end to end; changes nothing
+    screentime-security restore-backup FILE    add the history in a backup that is missing here
 
 Everything is local: no network access of any kind.
 """
@@ -91,6 +94,67 @@ def cmd_compact(args, km) -> int:
     return 0
 
 
+def _backup_errors():
+    from . import backup
+    return (backup.BackupError, SecureStoreError, KeyStoreError, storage.StorageError, OSError)
+
+
+def cmd_backup(args, km) -> int:
+    from . import backup
+    dest = args.file or backup.default_filename()
+    db = storage.open_database(recover_orphans=False, interactive=True, key_manager=km)
+    try:
+        info = backup.create_backup(db, dest, km=km, interactive=True, overwrite=args.force)
+    except FileExistsError:
+        print(f"Not written: {dest} already exists (use --force to replace it)", file=sys.stderr)
+        return 1
+    except _backup_errors() as e:
+        print(f"No backup was created: {e}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+    print(f"Backup written and verified: {dest}  ({info.sessions} sessions, {info.apps} applications)")
+    print("It is encrypted with your database key; keep your recovery key safe, it is needed to open it elsewhere.")
+    return 0
+
+
+def _recovery_text(args) -> Optional[str]:
+    return args.recovery_key
+
+
+def cmd_verify_backup(args, km) -> int:
+    from . import backup
+    try:
+        info = backup.verify_backup(args.file, km=km, recovery_key=_recovery_text(args), interactive=True)
+    except _backup_errors() as e:
+        print(f"FAILED: {e}", file=sys.stderr)
+        return 1
+    span = f"{info.first_day} .. {info.last_day}" if info.first_day else "no sessions"
+    print(f"OK: backup format {info.header.version}, made by ScreenTime {info.header.app_version}; "
+          f"{info.sessions} sessions, {info.apps} applications, {span}")
+    return 0
+
+
+def cmd_restore_backup(args, km) -> int:
+    from . import backup
+    try:
+        backup.verify_backup(args.file, km=km, recovery_key=_recovery_text(args), interactive=True)
+    except _backup_errors() as e:
+        print(f"Nothing was restored: {e}", file=sys.stderr)
+        return 1
+    db = storage.open_database(recover_orphans=False, interactive=True, key_manager=km)
+    try:
+        res = backup.restore_backup(db, args.file, km=km, recovery_key=_recovery_text(args), interactive=True)
+    except _backup_errors() as e:
+        print(f"Nothing was restored: {e}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+    print(f"Added {res.sessions_added} sessions and {res.apps_added} applications; "
+          f"{res.sessions_skipped} sessions were already present. Existing history was not changed.")
+    return 0
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="screentime-security", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -102,10 +166,18 @@ def main(argv: Optional[list] = None) -> int:
     imp.add_argument("key", nargs="?", help="omit to be prompted (keeps it out of shell history)")
     sub.add_parser("move-key-to-keyring")
     sub.add_parser("compact")
+    bk = sub.add_parser("backup")
+    bk.add_argument("file", nargs="?", help="default: ScreenTime-backup-<date>.screentime in the current folder")
+    bk.add_argument("--force", action="store_true", help="replace the file if it exists")
+    for name in ("verify-backup", "restore-backup"):
+        p = sub.add_parser(name)
+        p.add_argument("file")
+        p.add_argument("--recovery-key", help="needed only for a backup made by another installation")
     args = parser.parse_args(argv)
     km = KeyManager()
     handlers = {"status": cmd_status, "verify": cmd_verify, "export-recovery-key": cmd_export,
-                "import-recovery-key": cmd_import, "move-key-to-keyring": cmd_move, "compact": cmd_compact}
+                "import-recovery-key": cmd_import, "move-key-to-keyring": cmd_move, "compact": cmd_compact,
+                "backup": cmd_backup, "verify-backup": cmd_verify_backup, "restore-backup": cmd_restore_backup}
     try:
         return handlers[args.cmd](args, km)
     except (SecureStoreError, KeyStoreError, storage.StorageError) as e:
