@@ -75,9 +75,10 @@ Done and passing on Linux: the full existing suite plus the Windows unit tests a
 tooling (MSYS2 resolver/downloader against a synthetic repository with hash verification, bundle assembly and pruning,
 the DLL-import checker on a real PE file, deterministic zip, manifest, shellcheck, failure paths of the host script).
 
-**Not yet done:** nothing here has been executed on real Windows, and the container pipeline itself (image build, real
-MSYS2 downloads, Inno Setup under Wine, Wine smoke test) has not been run end to end. Unverified until a real build and a
-clean-machine run: the ctypes prototypes against the real DLLs, the message-window/tray threads, `schtasks` XML
-acceptance, that the MSYS2 ucrt64 runtime is complete enough (the static DLL check helps but cannot prove GTK works),
-the gdk-pixbuf loader-cache workaround, the renamed-`pythonw.exe` launchers, GUI behaviour under Wine, the Inno Setup
-script, "Restart Windows -> daemon starts", and real sleep/resume. Treat the Windows release as a release candidate.
+**Verified in CI:** the container pipeline (image build, MSYS2 downloads, Inno Setup under Wine, Wine smoke test) and the
+installer smoke test on a real Windows runner (`packaging/windows/smoke.ps1`) run on every pull request, push to `main` and
+release; 1.4.0 passed them.
+
+**Still not covered by automation:** real sleep/resume, "restart Windows -> the tracker starts", long-running behaviour of
+the tray and message-window threads, and the new notification path (`platform/windows/notify.py`, shell balloon/toast),
+which is unit-tested for text limits but has not been observed on a real desktop. Report problems on a real machine.

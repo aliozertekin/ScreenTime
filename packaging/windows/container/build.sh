@@ -31,7 +31,11 @@ step "Fetching the MSYS2 ${MSYS2_ENV} runtime (cached in $DL/msys2)"
 lock_before=""; [[ -f "$WORK/msys2.lock" ]] && lock_before=$(sha256sum "$WORK/msys2.lock" | cut -d' ' -f1)
 fetch_args=(--lock "$WORK/msys2.lock" --packages "$PKG/packages.txt" --cache "$DL/msys2" --stage "$CACHE/stage"
             --repo-urls "$MSYS2_REPO_URLS" --prefix "$MSYS2_PREFIX" --env "$MSYS2_ENV")
-[[ "${UPDATE_LOCK:-0}" == 1 ]] && fetch_args+=(--update-lock)
+if [[ "${UPDATE_LOCK:-0}" == 1 ]]; then
+  fetch_args+=(--update-lock)
+else
+  fetch_args+=(--require-lock)      # reproducibility: never resolve a fresh package set implicitly
+fi
 python3 "$PKG/msys2_fetch.py" "${fetch_args[@]}"
 lock_after=$(sha256sum "$WORK/msys2.lock" | cut -d' ' -f1)
 if [[ "$lock_before" != "$lock_after" ]]; then
@@ -61,9 +65,11 @@ inno_sha=$(sha256sum "$INNO_EXE" | cut -d' ' -f1)
 if [[ -f "$PKG/toolchain.lock" ]] && grep -q "^innosetup-${INNO_VERSION}.exe " "$PKG/toolchain.lock"; then
   want=$(awk -v f="innosetup-${INNO_VERSION}.exe" '$1==f{print $2}' "$PKG/toolchain.lock")
   [[ "$want" == "$inno_sha" ]] || die "Inno Setup checksum mismatch (expected $want, got $inno_sha). Delete the cached file and investigate before trusting it."
-else
+elif [[ "${UPDATE_LOCK:-0}" == 1 ]]; then
   echo "innosetup-${INNO_VERSION}.exe $inno_sha" > "$OUT/toolchain.lock.generated"
-  echo "NOTE: no pinned checksum for Inno Setup yet; recorded $inno_sha (commit packaging/windows/toolchain.lock)."
+  echo "NOTE: recorded the Inno Setup checksum $inno_sha (commit packaging/windows/toolchain.lock)."
+else
+  die "packaging/windows/toolchain.lock has no pinned SHA-256 for innosetup-${INNO_VERSION}.exe. Verification is mandatory; run with --update-lock, review the checksum against the official release, and commit it."
 fi
 ISCC="$WINEPREFIX/drive_c/Program Files (x86)/Inno Setup 6/ISCC.exe"
 # The prefix lives in the persistent cache: reinstall whenever the pinned installer changed, so an

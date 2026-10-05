@@ -136,7 +136,7 @@ Semantic versioning (`MAJOR.MINOR.PATCH`). The version is written in exactly thr
 3. `screentime/__init__.py` (`__version__`).
 
 To release: bump those three, move the `Unreleased` notes in `CHANGELOG.md` under the new version heading,
-run the tests, then tag `vMAJOR.MINOR.PATCH`. Patch = bug fixes, minor = new features/platforms/themes
+run the tests, merge to `main`, then push the tag `vMAJOR.MINOR.PATCH`: GitHub Actions builds, tests, smoke-tests and publishes the release ([RELEASING.md](RELEASING.md)). Patch = bug fixes, minor = new features/platforms/themes
 (backwards compatible with existing data), major = anything that breaks existing data or settings.
 Files that may only exist after a build (`ScreenTime.cmd`, the installer, `dist/`) must not be referenced
 in the README as if they were in the source tree; a test checks that README links and script paths exist.

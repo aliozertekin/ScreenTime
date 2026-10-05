@@ -263,7 +263,8 @@ def test_artifact_names_follow_the_project_version():
 
 @pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck not installed")
 def test_shell_scripts_pass_shellcheck():
-    for s in (ROOT / "scripts" / "build-windows.sh", PKG / "container" / "build.sh"):
+    for s in (ROOT / "scripts" / "build-windows.sh", PKG / "container" / "build.sh",
+              *sorted((ROOT / "scripts" / "ci").glob("*.sh"))):
         r = subprocess.run(["shellcheck", "-x", str(s)], capture_output=True, text=True)
         assert r.returncode == 0, r.stdout
 
@@ -321,7 +322,7 @@ def test_smoke_run_cli_never_returns_null_for_empty_output(tmp_path):
 def test_windows_workflow_fails_loudly_when_the_installer_is_missing():
     """A missing installer must stop the build job at upload and show up clearly in the smoke job, never as a
     confusing downstream error or a silently skipped smoke test."""
-    wf = (ROOT / ".github" / "workflows" / "windows.yml").read_text()
+    wf = (ROOT / ".github" / "workflows" / "windows-build.yml").read_text()
     assert "if-no-files-found: error" in wf                            # build job: no installer -> fail at upload
     assert "-Recurse" in wf and "ScreenTime-*-setup.exe" in wf        # smoke job: tolerate artifact nesting
     assert "-Mode Installer" in wf                                     # and the smoke test really runs the installer
@@ -408,3 +409,68 @@ def test_packaging_inputs_are_consistent():
     assert {"python", "python-gobject", "gtk4", "libadwaita", "librsvg", "adwaita-icon-theme"} <= set(roots)
     assert (ROOT / "scripts" / "build-windows.sh").stat().st_mode & 0o111
     assert (PKG / "container" / "build.sh").stat().st_mode & 0o111
+
+
+# ------------------------------------------------------------- reproducibility: the lock is mandatory
+def _fetch_args(tmp_path, url, *extra):
+    packages = tmp_path / "packages.txt"
+    packages.write_text("app\n")
+    return ["--lock", str(tmp_path / "msys2.lock"), "--packages", str(packages), "--cache", str(tmp_path / "cache"),
+            "--stage", str(tmp_path / "stage"), "--repo-urls", url, "--prefix", PREFIX, *extra]
+
+
+@needs_zstd
+def test_require_lock_refuses_to_resolve_fresh_packages(served, tmp_path, capsys):
+    url, _repo, _ = served
+    assert mf.main(_fetch_args(tmp_path, url, "--require-lock")) == 1
+    err = capsys.readouterr().err
+    assert "msys2.lock is missing" in err and "update-msys2-lock" in err
+    assert not (tmp_path / "msys2.lock").exists() and not (tmp_path / "stage").exists()      # nothing was resolved
+
+
+@needs_zstd
+def test_require_lock_uses_an_existing_lock_without_the_database_or_warning(served, tmp_path, capsys):
+    url, repo, _ = served
+    assert mf.main(_fetch_args(tmp_path, url, "--lock-only")) == 0
+    assert (tmp_path / "msys2.lock").exists() and not (tmp_path / "stage").exists()          # lock only: nothing downloaded
+    capsys.readouterr()
+    (repo / "ucrt64.db").unlink()
+    assert mf.main(_fetch_args(tmp_path, url, "--require-lock")) == 0
+    assert "not found" not in capsys.readouterr().out                                        # the old NOTE is gone
+
+
+@needs_zstd
+def test_lock_is_deterministic(served, tmp_path):
+    url, _repo, _ = served
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    mf.main(_fetch_args(a, url, "--lock-only"))
+    mf.main(_fetch_args(b, url, "--lock-only"))
+    la = [l for l in (a / "msys2.lock").read_text().splitlines() if not l.startswith("# source")]
+    lb = [l for l in (b / "msys2.lock").read_text().splitlines() if not l.startswith("# source")]
+    assert la == lb
+
+
+def test_container_build_requires_the_lock_and_the_inno_checksum():
+    sh = (PKG / "container" / "build.sh").read_text()
+    assert "--require-lock" in sh                                                           # normal builds never resolve
+    assert 'die "packaging/windows/toolchain.lock has no pinned SHA-256' in sh               # checksum is mandatory
+    assert sh.count("toolchain.lock.generated") == 1 and "UPDATE_LOCK:-0}\" == 1" in sh      # only recorded on --update-lock
+
+
+def test_inno_setup_version_has_one_canonical_home():
+    """Version drift guard: the version/URL/hash live in toolchain.env + toolchain.lock only."""
+    import re
+    ver = dict(l.split("=", 1) for l in (PKG / "toolchain.env").read_text().splitlines()
+               if re.match(r"^[A-Z0-9_]+=", l))["INNO_VERSION"]
+    needle = (ver, ver.replace(".", "_"))
+    allowed = {PKG / "toolchain.env", PKG / "toolchain.lock"}
+    offenders = []
+    for base in (ROOT / ".github", ROOT / "scripts", PKG, ROOT / "screentime"):
+        for f in base.rglob("*"):
+            if f.is_file() and f not in allowed and f.suffix in {".yml", ".yaml", ".sh", ".ps1", ".iss", ".py", ".txt", ".env"}:
+                text = f.read_text(errors="ignore")
+                if any(f"innosetup-{n}" in text or f"is-{n}" in text for n in needle):
+                    offenders.append(str(f.relative_to(ROOT)))
+    assert offenders == [], offenders
+    assert "inno" not in (ROOT / ".github" / "workflows" / "windows-build.yml").read_text().lower().replace("inno setup", "")

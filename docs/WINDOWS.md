@@ -20,6 +20,10 @@ unzip it anywhere and double-click **`ScreenTime.cmd`** inside the unzipped fold
 build* (see way 3, a Linux build). If you downloaded the source from GitHub ("Code → Download ZIP" or `git clone`) you will
 not find them. Use way 2 or build them.
 
+**Check your download.** Each release has a `SHA256SUMS` file. In PowerShell:
+`Get-FileHash .\ScreenTime-<version>-setup.exe -Algorithm SHA256`, and compare the result with the matching line.
+This confirms the file is the one the release build produced; it does not prove who built it.
+
 The installer is unsigned, so SmartScreen may say "unknown publisher": choose *More info → Run anyway*.
 
 ### 2. Run straight from the source (works today, no build)
@@ -53,7 +57,7 @@ Releases are built by the maintainer on a Linux machine; there is no need to bui
 ./scripts/build-windows.sh
 ```
 
-Output (in `dist/`): `ScreenTime-<version>-setup.exe`, `ScreenTime-<version>-portable.zip`, `build-manifest.txt` and
+Releases are normally built by GitHub Actions when a version tag is pushed (see [RELEASING.md](RELEASING.md)); to build yourself, the output (in `dist/`): `ScreenTime-<version>-setup.exe`, `ScreenTime-<version>-portable.zip`, `build-manifest.txt` and
 `SHA256SUMS`. `ScreenTime.cmd` is inside the zip (and inside the installed folder). Details and troubleshooting:
 [RELEASING.md](RELEASING.md).
 

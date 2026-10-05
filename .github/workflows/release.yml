@@ -1,0 +1,52 @@
+# git tag vX.Y.Z && git push origin vX.Y.Z   ->   tests -> Linux build -> real Windows smoke test -> SHA256SUMS -> GitHub Release
+# Nothing is published unless every earlier job succeeded. Re-running the workflow is safe: it completes an
+# existing release instead of creating a second one, and never replaces an asset that is already published.
+name: release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify-tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: v
+        run: echo "version=$(scripts/ci/check-release-tag.sh "$GITHUB_REF_NAME")" >> "$GITHUB_OUTPUT"
+      - name: The tagged commit must be on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::tag $GITHUB_REF_NAME is not on main"; exit 1; }
+
+  tests:
+    needs: verify-tag
+    uses: ./.github/workflows/tests.yml
+
+  windows:
+    needs: [verify-tag, tests]
+    uses: ./.github/workflows/windows-build.yml
+
+  publish:
+    needs: [verify-tag, tests, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write           # the only job that can write to the repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 5
+        with: { pattern: "screentime-windows-*", path: dist, merge-multiple: true }
+      - name: List what will be published
+        run: ls -l dist
+      - name: Checksums, then create or complete the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/publish-release.sh "$GITHUB_REF_NAME" dist

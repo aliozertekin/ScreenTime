@@ -11,6 +11,10 @@ under Wine), this tool
   3. downloads those files (cached), verifies every SHA-256, and unpacks them
      into one staging tree.
 
+With --require-lock (what every normal build and CI run passes) a missing lock is an ERROR, never a silent
+re-resolve; with --lock-only the lock is (re)written and nothing is downloaded (used by the
+"update-msys2-lock" workflow, which is the one sanctioned way to change the lock).
+
 With a lock file present, step 1 is skipped entirely and the build is
 reproducible: the same bytes every time, or a clear failure if the mirror no
 longer has a locked file (run with --update-lock to refresh).
@@ -231,15 +235,29 @@ def main(argv=None) -> int:
     ap.add_argument("--prefix", default="mingw-w64-ucrt-x86_64-")
     ap.add_argument("--env", default="ucrt64", help="MSYS2 environment / repository name")
     ap.add_argument("--update-lock", action="store_true")
+    ap.add_argument("--require-lock", action="store_true",
+                    help="fail instead of resolving fresh packages when the lock file is missing")
+    ap.add_argument("--lock-only", action="store_true", help="write the lock, download nothing (implies --update-lock)")
     a = ap.parse_args(argv)
+    if a.lock_only:
+        a.update_lock = True
+    if a.require_lock and a.update_lock and not a.lock_only:
+        pass                                             # explicit refresh wins over "require"
     urls = a.repo_urls.split()
     a.cache.mkdir(parents=True, exist_ok=True)
     try:
+        if a.require_lock and not a.update_lock and not a.lock.exists():
+            print(f"ERROR: {a.lock.name} is missing, and this build is not allowed to resolve a fresh package set "
+                  f"(that would make it irreproducible). Generate it once with the 'update-msys2-lock' workflow "
+                  f"or ./scripts/build-windows.sh --update-lock, review it, and commit it.", file=sys.stderr)
+            return 1
         if a.update_lock or not a.lock.exists():
             if not a.update_lock:
                 print(f"NOTE: {a.lock.name} not found; resolving the current MSYS2 packages and creating it. "
                       f"Commit it so later builds are reproducible.")
             make_lock(urls, read_roots(a.packages, a.prefix), a.lock, a.cache, a.env)
+            if a.lock_only:
+                return 0
         entries = read_lock(a.lock)
         files = fetch_all(entries, urls, a.cache)
         extract_all(files, a.stage, sha256_file(a.lock))

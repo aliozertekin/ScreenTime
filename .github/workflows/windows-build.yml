@@ -1,0 +1,69 @@
+# Reusable: build the Windows installer + portable zip on Linux (container, pinned toolchain, committed msys2.lock),
+# then run the REAL Windows smoke test (windows-2022) against the installer. Called by ci.yml and release.yml.
+# Artifacts: screentime-windows-installer, screentime-windows-portable (zip + SHA256SUMS + build-manifest.txt).
+name: windows-build
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the committed MSYS2 lock (reproducible builds never resolve packages themselves)
+        run: |
+          test -s packaging/windows/msys2.lock || { echo "::error::packaging/windows/msys2.lock is missing. Run the 'update-msys2-lock' workflow, review and commit the result."; exit 1; }
+      - run: sudo apt-get update && sudo apt-get install -y podman
+      - run: ./scripts/build-windows.sh --non-interactive --engine podman
+      # .exe and .zip are already compressed: store them as-is (compression-level 0).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screentime-windows-installer
+          path: dist/ScreenTime-*-setup.exe
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screentime-windows-portable
+          path: |
+            dist/ScreenTime-*-portable.zip
+            dist/SHA256SUMS
+            dist/build-manifest.txt
+          compression-level: 0
+          if-no-files-found: error
+
+  smoke-on-windows:
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 30          # a hung step must fail in minutes, not after GitHub's 6-hour default
+    steps:
+      - uses: actions/checkout@v4
+      # Artifact downloads occasionally stall on the storage backend. Bound each attempt and try twice.
+      - id: dl1
+        uses: actions/download-artifact@v4
+        timeout-minutes: 4
+        continue-on-error: true
+        with: { name: screentime-windows-installer, path: dist }
+      - if: steps.dl1.outcome != 'success'
+        uses: actions/download-artifact@v4
+        timeout-minutes: 4
+        with: { name: screentime-windows-installer, path: dist }
+      - shell: pwsh
+        timeout-minutes: 20
+        run: |
+          # -Recurse: tolerate any artifact-directory nesting. List dist BEFORE Write-Error, because pwsh steps run
+          # with $ErrorActionPreference = 'stop' and Write-Error would end the step before the listing printed.
+          $setupFile = Get-ChildItem -Path dist -Recurse -File -Filter 'ScreenTime-*-setup.exe' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($null -eq $setupFile) {
+            Write-Host "Contents of dist:"
+            Get-ChildItem -Path dist -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+            Write-Error "ScreenTime installer was not found in the downloaded artifact."
+            exit 1
+          }
+          Write-Host "Using installer: $($setupFile.FullName)"
+          ./packaging/windows/smoke.ps1 -Mode Installer -Setup $setupFile.FullName

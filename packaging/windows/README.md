@@ -35,8 +35,8 @@ container:  Containerfile                      Ubuntu 24.04 + Wine + Python + zs
 | --- | --- |
 | `toolchain.env` | pins: base image, Inno Setup version/URL, MSYS2 environment and mirrors |
 | `packages.txt` | root MSYS2 packages |
-| `msys2.lock` | exact package files + SHA-256 (created on the first build; **commit it**) |
-| `toolchain.lock` | SHA-256 of the Inno Setup installer (created on the first build; **commit it**) |
+| `msys2.lock` | exact package files + SHA-256. **Required**: builds refuse to run without it. Changed only by the `update-msys2-lock` workflow / `--update-lock` |
+| `toolchain.lock` | SHA-256 of the Inno Setup installer; verification is mandatory (the version lives only in `toolchain.env`) |
 | `system-dlls.txt` | extra Windows DLL names the bundle check should accept |
 | `installer.iss` | Inno Setup script |
 | `smoke.ps1` | optional check to run on a real Windows machine against the bundle or installer |
@@ -55,7 +55,7 @@ the DLL graph statically, is more predictable.
   Wine version used.
 * The first lock is created over HTTPS from the official MSYS2 mirror and then pinned by hash; package signatures
   are not verified.
-* Status: the tooling is covered by tests on synthetic packages and a real PE sample, but the container build,
-  Inno Setup under Wine, and the resulting installer have **not** been run end to end yet (no container engine or
-  access to the MSYS2/Inno download hosts where this was written). See "Verification status" in
+* Status: the container build, Inno Setup under Wine and the real-Windows installer smoke test run in GitHub Actions
+  on every pull request, push to `main` and release (1.4.0 passed them). The smoke test does not cover real
+  sleep/resume or a restart-and-autostart cycle. See "Verification status" in
   [docs/windows-developer.md](../../docs/windows-developer.md).

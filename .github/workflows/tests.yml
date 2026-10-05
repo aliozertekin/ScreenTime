@@ -1,0 +1,21 @@
+# Reusable: the full test suite (Linux, GTK under xvfb), on the plain and the encrypted storage backends.
+name: tests
+on:
+  workflow_call:
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          sudo apt-get update && sudo apt-get install -y python3-gi python3-psutil python3-cryptography
+          python3-pytest python3-yaml gir1.2-glib-2.0 gir1.2-gtk-4.0 gir1.2-adw-1 python3-gi-cairo python3-cairo
+          xvfb zstd librsvg2-bin imagemagick python3-pefile shellcheck
+      - name: Test suite
+        run: xvfb-run -a python3 -m pytest -q
+      - name: Test suite again on the encrypted storage backend
+        run: SCREENTIME_TEST_PROTECTED=1 xvfb-run -a python3 -m pytest -q

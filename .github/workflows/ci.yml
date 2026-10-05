@@ -1,0 +1,21 @@
+# Pull requests and pushes to main: tests + a full build validation (Linux build, real Windows smoke test).
+# Nothing here publishes anything. Releases are made by release.yml when a version tag is pushed.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  windows:
+    needs: tests
+    uses: ./.github/workflows/windows-build.yml

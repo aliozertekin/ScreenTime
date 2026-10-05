@@ -5,7 +5,8 @@
 #   ./scripts/build-windows.sh                # build  -> dist/ScreenTime-<version>-{setup.exe,portable.zip}
 #   ./scripts/build-windows.sh --clean        # rebuild the bundle from scratch (keeps the download cache)
 #   ./scripts/build-windows.sh --purge        # also delete downloads, Wine prefix and the build image
-#   ./scripts/build-windows.sh --update-lock  # re-resolve the MSYS2 packages and rewrite msys2.lock
+#   ./scripts/build-windows.sh --update-lock  # re-resolve the MSYS2 packages and rewrite msys2.lock (the ONLY way
+#                                             # the lock changes; normal builds refuse to run without it)
 #   ./scripts/build-windows.sh --verbose --non-interactive --skip-smoke --engine podman|docker
 set -euo pipefail
 
@@ -14,7 +15,7 @@ PKG="$REPO/packaging/windows"
 DIST="$REPO/dist"
 CLEAN=0; PURGE=0; VERBOSE=0; INTERACTIVE=1; UPDATE_LOCK=0; SKIP_SMOKE=0; ENGINE="${CONTAINER_ENGINE:-}"
 
-usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die()   { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
@@ -124,4 +125,4 @@ printf 'Installer:\n  %s  (%s)\n' "${SETUP#"$REPO"/}" "$(du -h "$SETUP" | cut -f
 printf 'Portable:\n  %s  (%s)\n' "${ZIP#"$REPO"/}" "$(du -h "$ZIP" | cut -f1)"
 printf 'Manifest:\n  %s\n' "${MAN#"$REPO"/}"
 echo
-echo "Upload the setup.exe (and optionally the zip and SHA256SUMS) to a GitHub Release: see docs/RELEASING.md"
+echo "To publish: push a version tag (git tag vX.Y.Z && git push origin vX.Y.Z); GitHub Actions does the rest. See docs/RELEASING.md"
