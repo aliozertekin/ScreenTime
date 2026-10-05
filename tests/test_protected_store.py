@@ -47,8 +47,11 @@ def test_whole_suite_switch_actually_uses_the_protected_backend(tmp_path):
 
 
 # ------------------------------------------------------------- basic behavior
-def test_plain_and_protected_databases_behave_identically(tmp_path, p):
+def test_plain_and_protected_databases_behave_identically(tmp_path, p, monkeypatch):
     """Same operations -> same rows, same totals."""
+    # apps.first_seen/last_seen come from the wall clock; freeze it so a second boundary between the two
+    # databases cannot make the digests differ (this used to fail ~1 run in 50, which would block a release).
+    monkeypatch.setattr("screentime.db.time.time", lambda: 1_790_000_000.0)
     def exercise(db):
         a = db.get_or_create_app("brave-browser", "Brave", None, None)
         b = db.get_or_create_app("konsole", "Konsole", "konsole", "x.desktop")
