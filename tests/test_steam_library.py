@@ -367,6 +367,8 @@ def test_package_imports_no_network_modules():
     root = Path(__file__).resolve().parent.parent / "screentime"
     offenders = []
     for py in root.rglob("*.py"):
+        if py.name == "updates.py":
+            continue          # the one opt-in network module (explicit "Check for updates"); see tests/test_updates.py
         for node in ast.walk(ast.parse(py.read_text())):
             names = []
             if isinstance(node, ast.Import):

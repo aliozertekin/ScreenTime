@@ -13,6 +13,7 @@ DEFAULTS = {
     "heartbeat_interval_seconds": "10",  # how often to persist progress (crash-safety granularity)
     "autostart_enabled": "false",
     "minimize_to_tray": "true",
+    "update_checks_enabled": "true",    # Settings -> Updates: lets the "Check for updates" button work. Nothing runs by itself.
     # Appearance -- three independent settings (see theme.py):
     "theme": _theme.DEFAULT_THEME_ID,   # a registered theme id
     "color_scheme": "system",           # system | light | dark (only adaptive themes honour it)
