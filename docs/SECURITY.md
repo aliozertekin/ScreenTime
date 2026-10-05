@@ -149,12 +149,27 @@ itself (it exposes the same API, but I could not run it), and the full
 
 ## Privacy
 
-All data is stored locally in `~/.local/share/screentime/screentime.sec`,
-encrypted at rest. This application makes **no network requests of any
-kind**: no HTTP client, no update checker, no crash reporter, no analytics SDK,
-no remote key server. No network module is imported anywhere in the package (a
-test enforces this). `grep -r "socket\|requests\|urllib\|http" screentime/`
-matches only two documentation URLs inside text strings. The only IPC is
-D-Bus on your own machine: `logind`, the compositor helpers, and (for the key)
-the local Secret Service.
+All data is stored locally (`~/.local/share/screentime/screentime.sec` on Linux,
+`%LOCALAPPDATA%\ScreenTime\screentime.sec` on Windows), encrypted at rest.
 
+**Network.** Tracking, statistics, goals, notifications, backups and exports never use the network and work
+fully offline. There is no telemetry, analytics SDK, crash reporter or remote key server. The single exception is
+the opt-in **update check** (Settings -> Updates -> Check now): when you press the button it makes one HTTPS GET to
+`https://api.github.com/repos/aliozertekin/ScreenTime/releases/latest` and reads the version number and release
+page URL. The request has no body and carries only a `User-Agent` with the ScreenTime version; no usage data,
+settings or identifiers are sent (GitHub necessarily sees your IP address). It never runs automatically, never
+downloads or installs anything, and is refused when *Allow update checks* is off. Only
+`screentime/updates.py` may import a network library; `tests/test_updates.py` and
+`tests/test_steam_library.py` fail if any other module does, and the tracking daemon and storage layer never
+import it. The other IPC is local: D-Bus (`logind`, the compositor helpers, the Secret Service and desktop
+notifications) and the Windows shell.
+
+**Backups.** A `.screentime` backup is the same AES-256-GCM secure-store format, sealed with the same key; the key
+and recovery key are never written into it. Its plaintext header records only the format name and version, the
+creation time and the ScreenTime version. To open a backup on another machine you need the recovery key of the
+installation that made it. Anyone holding both the file and that key can read it, so treat them like the live data.
+Restoring only adds missing sessions. As with the live store, a backup does not protect against someone replacing it
+with an older valid copy.
+
+**Exports.** CSV/JSON exports are **plaintext** by design. They contain application names and session times, never
+keys, recovery keys or credential-manager data. Keep them as private as you would the data itself.

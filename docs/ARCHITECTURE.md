@@ -62,6 +62,11 @@ appended, then adds its own record; readers pick up changes with a cheap
 | Theme system | `screentime/theme.py` | Semantic color tokens, built-in themes, KDE color mapping, CSS generation (pure Python) |
 | Theme manager | `screentime/gui/theme_manager.py` | Applies the theme live to GTK/libadwaita; follows desktop color changes |
 | Steam names | `screentime/steam_library.py` | Offline Steam AppID -> game-name resolution from Steam's local manifests (`steam_app_<id>` windows); cached, invalidated when Steam's files change |
+| Goals | `screentime/goals.py` | Optional daily goals (total + per app), warning threshold, de-duplicated notification logic; stored in the `settings` table (`goals_v1`) and evaluated by the daemon every 30 s |
+| Notifications | `screentime/notifications.py`, `platform/windows/notify.py` | Local desktop notifications (freedesktop on Linux, shell balloon/toast on Windows); failure is never fatal |
+| Backup | `screentime/backup.py` | Encrypted `.screentime` backup/verify/restore on top of the secure store; restore is additive (`Database.merge_history`) |
+| Export | `screentime/exporter.py` | Plaintext CSV/JSON export of tracked sessions (no key material) |
+| Update check | `screentime/updates.py` | The only module that may use the network; manual "Check for updates" against GitHub Releases; never imported by the daemon or storage |
 | Packaging hook | `screentime.install` | pacman post-upgrade: restarts running per-user daemons |
 | Single-instance guard | `screentime/instance_lock.py` | `flock`-based lock so only one daemon ever tracks, however it was launched |
 | Wayland companion installer | `screentime/wayland_setup.py` | Auto-installs/enables the GNOME extension or KWin script on first run |
@@ -210,6 +215,8 @@ All settings live in the `settings` table and are editable from
 | `idle_timeout_seconds` | `300` (5 min) | Stop counting active time after this long without input |
 | `poll_interval_seconds` | `2` | How often the daemon checks the focused window |
 | `heartbeat_interval_seconds` | `10` | Crash-safety checkpoint granularity |
+| `update_checks_enabled` | `true` | Whether the manual "Check now" button may contact GitHub (nothing ever runs automatically) |
+| `goals_v1`, `goals_notified_v1` | unset | Goals (JSON) and which goal notifications were already shown today |
 | `autostart_enabled` | `false` | The user's start-at-login opt-in (written by the Settings switch; used to self-heal on GUI start) |
 | `daemon_last_start` | — | Written by the daemon at startup (unix time); shown in Diagnostics |
 | `active_window_backend` / `active_idle_backend` | — | Written by the daemon; read-only for the GUI/diagnostics |

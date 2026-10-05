@@ -4,6 +4,37 @@ Versions follow semantic versioning. The version lives in `pyproject.toml`,
 `PKGBUILD` (`pkgver`) and `screentime/__init__.py` (`__version__`);
 `tests/test_version.py` fails if they disagree.
 
+## 1.5.0 — dashboard, goals, encrypted backup, export, opt-in update check, automated releases
+
+**App**
+* New **dashboard**: Today / Last 7 days / Last 30 days, total screen time, comparison with the previous
+  period, most-used apps with percentages, a daily trend chart, goal progress, and an empty state. Built from
+  the existing `daily_totals` queries (`stats.dashboard_data`), so it stays fast with years of history.
+* **Goals and notifications** (Settings → Goals and notifications): an optional daily total goal, per-app
+  goals and a warning threshold (default 80%). The daemon compares usage with goals every 30 s and sends a native
+  desktop notification once per goal per day when the threshold and when the goal are reached (freedesktop
+  notifications on Linux, shell notifications on Windows). Notifications can be turned off; nothing is ever
+  blocked or closed. Goals are stored locally in the settings table (no schema change). Category goals are not
+  supported (ScreenTime has no categories).
+* **Encrypted backup / restore** (Settings → Export and backup, `screentime-security backup | verify-backup |
+  restore-backup`): a `.screentime` file in the existing AES-256-GCM secure-store format with a versioned header; the
+  key is never included. Backups are verified before they are reported as created; restore validates the whole
+  file first and then only **adds** missing sessions (no overwrite, idempotent). Corrupt, truncated, wrong-key and
+  newer-format backups are rejected cleanly.
+* **CSV / JSON export** of every tracked session (UTF-8, stable field names, `schema_version`, RFC 4180
+  quoting, spreadsheet-formula neutralisation). Plaintext by design and labelled as such; never contains keys.
+* **Opt-in update check** (Settings → Updates): a manual button that reads the latest GitHub release number.
+  No background polling, no telemetry, can be disabled; `screentime/updates.py` is the only module allowed to import a
+  network library (tests enforce it). Offline use is unaffected.
+
+**Releases and build**
+* Pushing a tag `vX.Y.Z` now runs tests → Linux build → real-Windows smoke test → `SHA256SUMS` → GitHub Release
+  (`.github/workflows/release.yml`); retries complete the same release instead of creating another. Pull
+  requests and pushes to `main` run tests and build validation only (`ci.yml`).
+* Reproducible Windows builds: builds require the committed `packaging/windows/msys2.lock` and no longer resolve
+  packages themselves; the Inno Setup checksum is mandatory. The lock is changed only by the
+  `update-msys2-lock` workflow / `--update-lock`.
+
 ## 1.4.0 — Windows support; documentation reorganised
 
 **Windows 10/11 (64-bit)** is now a platform of the same app, daemon and encrypted store
