@@ -183,6 +183,86 @@ def app_detail(db: Database, app_id: int) -> AppDetail:
     )
 
 
+# ------------------------------------------------------------------ dashboard
+PERIODS = (1, 7, 30)                     # days: Today, Last 7 days, Last 30 days
+TREND_DAYS = {1: 7, 7: 7, 30: 30}        # "Today" still shows the last week as context
+
+
+@dataclass
+class Comparison:
+    current: int
+    previous: int
+
+    @property
+    def delta(self) -> int:
+        return self.current - self.previous
+
+    @property
+    def percent(self) -> float | None:
+        """Change relative to the previous period; None when there is nothing to compare with."""
+        return None if self.previous <= 0 else self.delta / self.previous * 100.0
+
+
+def describe_change(c: Comparison, previous_label: str) -> str:
+    """One plain sentence ("18% more than yesterday"). Wording, not just colour, carries the meaning."""
+    if c.previous <= 0:
+        return f"No usage recorded for {previous_label} to compare with"
+    pct = c.percent
+    if abs(c.delta) < 60 or abs(pct) < 1:
+        return f"About the same as {previous_label}"
+    word = "more" if c.delta > 0 else "less"
+    return f"{abs(pct):.0f}% {word} than {previous_label} ({format_duration(abs(c.delta))} {word})"
+
+
+@dataclass
+class DashboardData:
+    period_days: int
+    start: str
+    end: str
+    summary: RangeSummary
+    comparison: Comparison
+    previous_label: str
+    daily: list                          # [(day 'YYYY-MM-DD', seconds)] zero-filled, oldest first
+    average_seconds: int                 # per day over the period
+    busiest_day: tuple | None            # (day, seconds) within the trend window, or None
+
+    @property
+    def has_data(self) -> bool:
+        return self.summary.total_seconds > 0 or any(s for _d, s in self.daily)
+
+
+def fill_days(rows: list, start: datetime.date, end: datetime.date) -> list:
+    """Every day from start to end inclusive, with 0 for days that have no row."""
+    have = dict(rows)
+    out, d = [], start
+    while d <= end:
+        out.append((d.isoformat(), int(have.get(d.isoformat(), 0))))
+        d += datetime.timedelta(days=1)
+    return out
+
+
+def dashboard_data(db: Database, period_days: int) -> DashboardData:
+    """Everything the dashboard shows, from the existing aggregate queries (never the raw session log):
+    a handful of GROUP BYs over `daily_totals`, so it stays fast with years of history."""
+    if period_days not in PERIODS:
+        raise ValueError(f"period must be one of {PERIODS}")
+    today = _today()
+    start = today - datetime.timedelta(days=period_days - 1)
+    prev_end = start - datetime.timedelta(days=1)
+    prev_start = prev_end - datetime.timedelta(days=period_days - 1)
+    summary = usage_in_range(db, start.isoformat(), today.isoformat())
+    prev_total = usage_in_range(db, prev_start.isoformat(), prev_end.isoformat()).total_seconds
+    trend_days = TREND_DAYS[period_days]
+    t_start = today - datetime.timedelta(days=trend_days - 1)
+    daily = fill_days(daily_totals_all_apps(db, t_start.isoformat(), today.isoformat()), t_start, today)
+    busiest = max(daily, key=lambda d: d[1]) if any(s for _d, s in daily) else None
+    label = {1: "yesterday", 7: "the previous 7 days", 30: "the previous 30 days"}[period_days]
+    return DashboardData(
+        period_days=period_days, start=start.isoformat(), end=today.isoformat(), summary=summary,
+        comparison=Comparison(summary.total_seconds, prev_total), previous_label=label, daily=daily,
+        average_seconds=summary.total_seconds // period_days, busiest_day=busiest)
+
+
 def format_duration(seconds: int) -> str:
     seconds = int(seconds)
     h, rem = divmod(seconds, 3600)
