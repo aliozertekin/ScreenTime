@@ -17,6 +17,9 @@ from ...keystore import KeyManager, KeyStoreError
 from ...secure_log import SecureStoreError
 from ..theme_manager import ensure_theme_manager
 from ..widgets.bar_chart import BarChart
+from .goals_group import GoalsGroup
+from .data_group import DataGroup
+from .updates_group import UpdatesGroup
 
 
 class SettingsView(Gtk.Box):
@@ -41,6 +44,10 @@ class SettingsView(Gtk.Box):
         self.append(scroller)
 
         col.append(self._build_appearance_group())
+        self.goals_group = GoalsGroup(db)
+        col.append(self.goals_group)
+        for extra in self.goals_group.extra_groups():
+            col.append(extra)
         col.append(self._build_security_group())
 
         # ---- Tracking behavior -------------------------------------------------
@@ -157,12 +164,19 @@ class SettingsView(Gtk.Box):
         rebuild_row.add_suffix(rebuild_btn)
         data_group.add(rebuild_row)
         col.append(data_group)
+        self.data_group = DataGroup(db)
+        col.append(self.data_group)
+
+        # ---- Updates (opt-in, manual) ---------------------------------------------
+        self.updates_group = UpdatesGroup(db)
+        col.append(self.updates_group)
 
         # ---- Privacy ------------------------------------------------------------------
         privacy_group = Adw.PreferencesGroup(title="Privacy")
         privacy_row = Adw.ActionRow(
             title="All data stays on this computer",
-            subtitle="No telemetry, no cloud services, no network access. Ever.",
+            subtitle="No telemetry, no accounts, no cloud. The only network use is the update check "
+                     "you start yourself in Settings \u2192 Updates.",
         )
         privacy_group.add(privacy_row)
         col.append(privacy_group)
@@ -432,6 +446,7 @@ class SettingsView(Gtk.Box):
         self._refresh_backend_rows()
         self._refresh_startup_rows()
         self._refresh_security_rows()
+        self.goals_group.refresh_status()
 
     def _refresh_startup_rows(self):
         st = autostart.get_status(self.db)
