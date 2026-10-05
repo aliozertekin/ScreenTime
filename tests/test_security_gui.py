@@ -10,7 +10,7 @@ if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk
 
 Adw.init()
 
@@ -169,14 +169,53 @@ def test_unlock_success_and_failure_messages(protected_view):
 
 
 # ------------------------------------------------------------ the "can't open" screen
+def release_app(app):
+    """Really release a GApplication that a test registered by hand.
+
+    `register()` exports the application on the session bus (object /org/screentime/App, interface
+    org.gtk.Application) and Gio has no public "unregister". `quit()` does not undo that: it only flags a running
+    main loop to stop, so a manually registered app stays registered, and the next app with the same application
+    id fails with "An object is already exported for the interface org.gtk.Application". The exported action
+    group also holds a reference to the app, so it is never garbage-collected either.
+
+    The one supported way to tear the registration down is the lifecycle `run()` ends with (shutdown, then
+    unregister). `run()` returns immediately if `quit()` was already called, so quit has to happen *inside* it:
+    schedule it from an idle callback. `activate` is disconnected first because `run()` would emit it again.
+    """
+    for win in list(app.get_windows()):
+        win.destroy()
+    app.disconnect_by_func(app._on_activate)
+    GLib.idle_add(lambda: (app.quit(), GLib.SOURCE_REMOVE)[1])
+    app.run([])
+    assert not app.get_is_registered(), "the application is still registered and would block the next test"
+
+
 @pytest.fixture
 def locked_app():
     from screentime.gui.unlock import LockedApp
     app = LockedApp(storage.KeyLostError("x"))
-    app.register(None)
-    app._on_activate(app)
-    yield app
-    app.quit()
+    try:
+        app.register(None)
+        app._on_activate(app)
+        yield app
+    finally:                      # runs for a failing test and for a failing setup too
+        release_app(app)
+
+
+def test_locked_apps_can_be_created_one_after_another_in_one_process():
+    """Regression: the fixed application id used to make every LockedApp after the first fail to register."""
+    from screentime.gui.unlock import LockedApp
+    for _ in range(4):
+        app = LockedApp(storage.KeyLostError("x"))
+        assert app.get_application_id() == "org.screentime.App"          # production id is unchanged
+        assert app.get_flags() == Gio.ApplicationFlags.FLAGS_NONE       # still a unique (single-instance) app
+        try:
+            app.register(None)
+            app._on_activate(app)
+            assert app.get_is_registered() and len(app.get_windows()) == 1
+        finally:
+            release_app(app)
+        assert not app.get_is_registered() and not app.get_windows()
 
 
 def test_locked_screen_explains_in_plain_language(locked_app):
