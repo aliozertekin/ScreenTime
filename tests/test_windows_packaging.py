@@ -482,7 +482,9 @@ def test_update_msys2_lock_script_runs_end_to_end_against_a_local_mirror(served,
     output is then accepted by a --require-lock build step. Catches a broken generator before it reaches CI."""
     url, _repo, closure = served
     tree = tmp_path / "tree"
-    shutil.copytree(PKG, tree / "packaging" / "windows", ignore=shutil.ignore_patterns("container", "__pycache__"))
+    # The real, committed msys2.lock must not leak into this scratch tree: the generator has to create its own.
+    shutil.copytree(PKG, tree / "packaging" / "windows",
+                    ignore=shutil.ignore_patterns("container", "__pycache__", "msys2.lock"))
     (tree / "scripts" / "ci").mkdir(parents=True)
     shutil.copy(ROOT / "scripts" / "ci" / "update-msys2-lock.sh", tree / "scripts" / "ci")
     env_file = tree / "packaging" / "windows" / "toolchain.env"
@@ -502,3 +504,25 @@ def test_update_msys2_lock_script_runs_end_to_end_against_a_local_mirror(served,
                   str(tmp_path / "cache"), "--stage", str(tmp_path / "stage"), "--repo-urls", url,
                   "--prefix", PREFIX, "--require-lock"])
     assert ok == 0
+
+
+# ----------------------------------------------------- the committed lock itself (it is a release input)
+def _toolchain():
+    import re
+    return dict(l.split("=", 1) for l in (PKG / "toolchain.env").read_text().splitlines() if re.match(r"^[A-Z0-9_]+=", l))
+
+
+def test_the_committed_msys2_lock_is_present_well_formed_and_covers_every_package_root():
+    lock = PKG / "msys2.lock"
+    assert lock.is_file(), "packaging/windows/msys2.lock must be committed (see docs/RELEASING.md)"
+    entries = mf.read_lock(lock)                                   # raises on a malformed line or an empty file
+    files = [f for f, _h, _p in entries]
+    pkgs = [p for _f, _h, p in entries]
+    assert len(set(files)) == len(files) and len(set(pkgs)) == len(pkgs), "duplicate entries"
+    assert all(f.endswith(".pkg.tar.zst") and f.startswith(p + "-") for f, _h, p in entries)
+    prefix = _toolchain()["MSYS2_PREFIX"]
+    assert all(p.startswith(prefix) for p in pkgs), "every locked package belongs to the pinned environment"
+    missing = [r for r in mf.read_roots(PKG / "packages.txt", prefix) if r not in set(pkgs)]
+    assert missing == [], f"packages.txt lists packages that are not in the lock (regenerate it): {missing}"
+    pinned_repo = _toolchain()["MSYS2_REPO_URLS"].strip('"').split()[0].rstrip("/")
+    assert f"# source: {pinned_repo}" in lock.read_text().splitlines(), "the lock was made from a different repository than toolchain.env pins"
