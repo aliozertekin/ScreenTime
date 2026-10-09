@@ -64,8 +64,20 @@ Changing the lock is a deliberate act: run the **update-msys2-lock** workflow (A
 regenerates the lock from the pinned repository and pushes it to branch `chore/update-msys2-lock`; review the diff,
 open a PR and merge. Locally: `./scripts/build-windows.sh --update-lock` (also records a missing Inno checksum).
 
-**First-time setup:** a repository that does not yet contain `packaging/windows/msys2.lock` fails its Windows build
-with a message saying so. Run the workflow above once and merge the result.
+**First-time setup (required once):** a repository that does not yet contain `packaging/windows/msys2.lock` fails its
+Windows build with a message saying so. Either:
+
+* on GitHub: Actions -> **update-msys2-lock** -> Run workflow, tick **commit_to_main** (or leave it off to get the
+  review branch `chore/update-msys2-lock`, then open a PR and merge it); or
+* on any machine with internet, `python3` and `zstd`:
+
+  ```bash
+  ./scripts/ci/update-msys2-lock.sh
+  git add packaging/windows/msys2.lock && git commit -m "windows: add msys2.lock" && git push
+  ```
+
+Nothing changes on `main` until the lock is merged or pushed there; the workflow alone does not fix a failing build.
+Commits pushed by a workflow do not trigger other workflows, so re-run the failed CI run afterwards.
 
 What is and is not reproducible: same commit + same `msys2.lock` + same `toolchain.env` give the same bundle and
 portable zip contents. The Inno Setup installer is not bit-for-bit reproducible, and the base image is the floating

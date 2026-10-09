@@ -109,7 +109,10 @@ def test_tests_workflow_runs_gtk_tests_and_the_encrypted_backend_pass_with_yaml_
     assert "-x" not in steps_text(TESTS["jobs"]["pytest"]).replace("-xvfb", "")
 
 
-def test_lock_update_workflow_is_manual_and_only_pushes_a_review_branch():
+def test_lock_update_workflow_is_manual_and_pushes_to_main_only_when_asked():
     assert set(LOCK["_on"]) == {"workflow_dispatch"}
+    inp = LOCK["_on"]["workflow_dispatch"]["inputs"]["commit_to_main"]
+    assert inp["type"] == "boolean" and inp["default"] is False                 # review branch unless explicitly requested
     t = (WF_DIR / "update-msys2-lock.yml").read_text()
-    assert "chore/update-msys2-lock" in t and "origin main" not in t and "push --force origin chore" in t
+    assert "chore/update-msys2-lock" in t and 'if [ "$TO_MAIN" = "true" ]' in t
+    assert t.count("git push") == 2 and "--force origin HEAD:refs/heads/chore/" in t     # force only ever touches the review branch

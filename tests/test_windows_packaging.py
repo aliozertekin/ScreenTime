@@ -474,3 +474,31 @@ def test_inno_setup_version_has_one_canonical_home():
                     offenders.append(str(f.relative_to(ROOT)))
     assert offenders == [], offenders
     assert "inno" not in (ROOT / ".github" / "workflows" / "windows-build.yml").read_text().lower().replace("inno setup", "")
+
+
+@needs_zstd
+def test_update_msys2_lock_script_runs_end_to_end_against_a_local_mirror(served, tmp_path):
+    """The script behind the 'update-msys2-lock' workflow, run for real (only the mirror URL is swapped), and its
+    output is then accepted by a --require-lock build step. Catches a broken generator before it reaches CI."""
+    url, _repo, closure = served
+    tree = tmp_path / "tree"
+    shutil.copytree(PKG, tree / "packaging" / "windows", ignore=shutil.ignore_patterns("container", "__pycache__"))
+    (tree / "scripts" / "ci").mkdir(parents=True)
+    shutil.copy(ROOT / "scripts" / "ci" / "update-msys2-lock.sh", tree / "scripts" / "ci")
+    env_file = tree / "packaging" / "windows" / "toolchain.env"
+    env_file.write_text("".join(
+        f'MSYS2_REPO_URLS="{url}"\n' if l.startswith("MSYS2_REPO_URLS=") else l + "\n"
+        for l in env_file.read_text().splitlines()))
+    (tree / "packaging" / "windows" / "packages.txt").write_text("app\n")
+    lock = tree / "packaging" / "windows" / "msys2.lock"
+    assert not lock.exists()
+    r = subprocess.run(["bash", str(tree / "scripts" / "ci" / "update-msys2-lock.sh")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "wrote" in r.stdout and lock.stat().st_size > 0
+    names = {l.split()[0] for l in lock.read_text().splitlines() if l and not l.startswith("#")}
+    assert any("app" in n for n in names) and len(names) == len(closure)
+    assert not (tree / "packaging" / "windows" / "stage").exists()                   # nothing was built or downloaded
+    ok = mf.main(["--lock", str(lock), "--packages", str(tree / "packaging/windows/packages.txt"), "--cache",
+                  str(tmp_path / "cache"), "--stage", str(tmp_path / "stage"), "--repo-urls", url,
+                  "--prefix", PREFIX, "--require-lock"])
+    assert ok == 0

@@ -3,6 +3,11 @@
 name: update-msys2-lock
 on:
   workflow_dispatch:
+    inputs:
+      commit_to_main:
+        description: "Commit the lock straight to main (otherwise it goes to branch chore/update-msys2-lock for review)"
+        type: boolean
+        default: false
 permissions:
   contents: write
 jobs:
@@ -15,13 +20,20 @@ jobs:
       - run: scripts/ci/update-msys2-lock.sh
       - uses: actions/upload-artifact@v4
         with: { name: msys2.lock, path: packaging/windows/msys2.lock, if-no-files-found: error }
-      - name: Push the lock to a review branch
+      - name: Commit the lock
+        env:
+          TO_MAIN: ${{ inputs.commit_to_main }}
+          BASE: ${{ github.event.repository.default_branch }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B chore/update-msys2-lock
           git add packaging/windows/msys2.lock
-          git diff --cached --quiet && { echo "lock unchanged"; exit 0; }
+          if git diff --cached --quiet; then echo "lock unchanged" >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
           git commit -m "windows: update msys2.lock"
-          git push --force origin chore/update-msys2-lock
-          echo "Pushed branch chore/update-msys2-lock - review the diff, open a PR and merge it." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$TO_MAIN" = "true" ]; then
+            git push origin "HEAD:refs/heads/${BASE}"
+            echo "Committed msys2.lock to ${BASE}. Pushes made with GITHUB_TOKEN do not start other workflows: re-run the failed CI run, or push any commit." >> "$GITHUB_STEP_SUMMARY"
+          else
+            git push --force origin HEAD:refs/heads/chore/update-msys2-lock
+            echo "Pushed branch chore/update-msys2-lock - review the diff, open a PR and merge it." >> "$GITHUB_STEP_SUMMARY"
+          fi
